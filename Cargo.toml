@@ -2,6 +2,13 @@
 name = "bitcoin-block-parser"
 version = "0.1.0"
 edition = "2021"
+authors = ["Saigo Nanshu"]
+license = "MIT"
+repository = "https://github.com/sumopool/bitcoin-block-parser"
+readme = "README.md"
+description = "Fast optimized parser for the bitcoin `blocks` data with UTXO tracking."
+categories = ["cryptography::cryptocurrencies"]
+keywords = [ "crypto", "bitcoin" ]
 
 [dependencies]
 bitcoin = "0.32.2"

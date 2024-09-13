@@ -35,7 +35,7 @@ enum Function {
 fn main() -> Result<()> {
     let args = Args::parse();
     let mut locations = BlockLocation::parse(&args.input)?;
-    locations.truncate(850_000);
+    locations.truncate(300_000);
     let parser = BlockParser::new(&locations);
     match args.run {
         Function::WriteFilter => { parser.write_filter(&args.filter_file)?; },

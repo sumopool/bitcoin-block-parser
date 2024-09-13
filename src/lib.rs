@@ -40,7 +40,7 @@ type UnspentFilter = ScalableCuckooFilter<OutPoint>;
 type ResultBlock = Result<ParsedBlock>;
 
 /// Contains a block that has been parsed and additional metadata we have derived about it
-#[derive(Clone, Debug)]
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ParsedBlock {
     pub block: Block,
     /// Precomputed txids for every transaction
@@ -368,7 +368,7 @@ impl BlockLocation {
                 // Get the size of the next block
                 let size = u32::from_le_bytes(buffer[4..].try_into()?) as usize;
                 // Subtract the number of bytes in the block header we consumed
-                reader.seek_relative((size - HEADER_SIZE) as i64)?;
+                reader.seek_relative((size.saturating_sub(HEADER_SIZE)) as i64)?;
                 offset += size;
             }
         }
