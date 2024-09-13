@@ -1,3 +1,8 @@
+//! Use [`HeaderParser`] to read from your node's `blocks` directory.
+//!
+//! You will get back Vec<[`ParsedHeader`]> that identifies every block.  You can take a slice or
+//! even reorder these headers before you pass them into [`crate::BlockParser`].
+
 use anyhow::bail;
 use anyhow::Result;
 use bitcoin::block::Header;
