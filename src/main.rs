@@ -1,12 +1,10 @@
 use anyhow::Result;
-use bitcoin::{Amount, BlockHash, Transaction, Txid};
+use bitcoin::{Amount, BlockHash, Txid};
 use bitcoin_block_parser::blocks::{BlockParser, DefaultParser};
 use bitcoin_block_parser::headers::HeaderParser;
 use bitcoin_block_parser::utxos::{FilterParser, OutStatus, UtxoParser};
 use clap::{Parser, ValueEnum};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 /// Example program that can perform self-tests and benchmarks
 #[derive(Parser, Debug)]

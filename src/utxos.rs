@@ -1,3 +1,52 @@
+//! The [`FilterParser`] and [`UtxoParser`] parser must be used together in order to track UTXOs
+//! as they move through the tx graph, giving you a map between:
+//! * [`bitcoin::TxIn`] -> [`Amount`]
+//! * [`bitcoin::TxOut`] -> [`OutStatus::Spent`] or [`OutStatus::Unspent`]
+//!
+//! This allows you to easily compute values such as mining fees and find all unspent txs.
+//! The [`FilterParser`] creates a [`ScalableCuckooFilter`] which allows us to track all
+//! unspent UTXOs with low memory-overhead similar to a bloom filter.
+//!
+//! The filter is written to a file which is loaded into memory by [`UtxoParser`], allowing us to
+//! track the flow of all transaction amounts from inputs with a far lower memory overhead and no
+//! performance hit of using an on-disk lookup table.
+//!
+//! Example usage:
+//!
+//! ```
+//! use bitcoin_block_parser::*;
+//! use bitcoin_block_parser::utxos::*;
+//!
+//! let mut headers = HeaderParser::parse("/path/to/blocks")?;
+//! // Note you only need to write the filter to a file once
+//! let parser = FilterParser::new();
+//! for _ in parser.parse(&headers) {}
+//! parser.write("filter.bin")?;
+//!
+//! let parser = UtxoParser::new("filter.bin")?;
+//! // for every block
+//! for block in parser.parse(&headers) {
+//!   let block = block?;
+//!   // for every transaction
+//!   for (tx, txid) in block.transactions() {
+//!     let outs = block.output_status(txid).iter().zip(tx.output.iter());
+//!     let inputs = block.input_amount(txid).iter().zip(tx.input.iter());
+//!     // for every output in the transaction
+//!     for (status, output) in outs {
+//!       if *status == OutStatus::Unspent {
+//!         let script = &output.script_pubkey;
+//!         println!("{:?} has {} unspent funds", script, output.value);
+//!       }
+//!     }
+//!     // for every input in the transaction
+//!     for (amount, input) in inputs {
+//!       let outpoint = &input.previous_output;
+//!       println!("{:?} has {} input funds", outpoint, amount);
+//!     }
+//!   }
+//! }
+//! ```
+
 use crate::blocks::{BlockParser, Options};
 use anyhow::Result;
 use bitcoin::hashes::Hash;
@@ -6,7 +55,6 @@ use rand::rngs::SmallRng;
 use rand::{Error, RngCore, SeedableRng};
 use rustc_hash::{FxHashMap, FxHasher};
 use scalable_cuckoo_filter::{ScalableCuckooFilter, ScalableCuckooFilterBuilder};
-use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::hash::Hasher;
@@ -37,7 +85,7 @@ impl Default for FilterParser {
 impl FilterParser {
     /// Constructs a new filter with a safe size and false positive rate
     ///
-    /// Because we are storing SHA256 hashes from [`Txid`] we use non-cryptographic [`Rng`] and
+    /// Because we are storing SHA256 hashes from [`Txid`] we use non-cryptographic [`rand::Rng`] and
     /// [`Hasher`] which are optimized for speed without bias.
     pub fn new() -> Self {
         Self {
@@ -142,8 +190,7 @@ pub enum OutStatus {
 
 /// Parser that tracks unspent outputs and input amounts to produce [`UtxoBlock`]
 ///
-/// * Unspent outputs allow you to determine the current set of spendable UTXOs
-/// * Input amounts allow you to calculate mining fees and trace spending patterns
+/// See the [module docs](crate::utxos) for example usage.
 #[derive(Clone)]
 pub struct UtxoParser {
     unspent: Arc<Mutex<FxHashMap<ShortOutPoint, Amount>>>,
@@ -198,7 +245,7 @@ impl BlockParser<UtxoBlock, UtxoBlock> for UtxoParser {
         for mut block in items {
             let mut input_amounts = FxHashMap::<Txid, Vec<Amount>>::default();
             for (tx, txid) in block.transactions() {
-                let statuses = block.output_status(&txid);
+                let statuses = block.output_status(txid);
                 for (status, (index, output)) in statuses.iter().zip(tx.output.iter().enumerate()) {
                     let outpoint = ShortOutPoint::new(&OutPoint::new(*txid, index as u32));
                     // do not cache unspent outputs (or we will use a lot of memory in `self.unspent`
@@ -226,8 +273,10 @@ impl BlockParser<UtxoBlock, UtxoBlock> for UtxoParser {
     }
 
     /// In order to track UTXO amounts we must process blocks in-order
+    /// We reduce the number of threads to reduce memory usage.
+    /// If you run into memory issues try lowering `num_threads` further or the `buffer_size`
     fn options() -> Options {
-        Options::default().order_output()
+        Options::default().order_output().num_threads(64)
     }
 }
 
