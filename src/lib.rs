@@ -4,22 +4,31 @@
 use anyhow::Result;
 use anyhow::{anyhow, bail};
 use bitcoin::block::Header;
-use bitcoin::consensus::Decodable;
+use bitcoin::consensus::encode::{Error, MAX_VEC_SIZE};
+use bitcoin::consensus::{encode, Decodable, Encodable};
 use bitcoin::hashes::Hash;
-use bitcoin::{Amount, Block, BlockHash, OutPoint, Transaction, Txid};
+use bitcoin::io::BufRead;
+use bitcoin::transaction::Version;
+use bitcoin::{
+    absolute, Amount, Block, BlockHash, OutPoint, Transaction, TxIn, TxOut, Txid, VarInt, Witness,
+};
 use rustc_hash::FxHashMap;
 use scalable_cuckoo_filter::ScalableCuckooFilter;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read};
+use std::io::{BufReader, BufWriter, Read, Seek};
 use std::iter::Zip;
 use std::path::{Path, PathBuf};
 use std::slice::Iter;
-use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{mpsc, Arc};
 use std::time::Instant;
-use std::{fs, thread};
+use std::{fs, mem, thread};
 use threadpool::ThreadPool;
+
+pub mod blocks;
+pub mod headers;
+pub mod utxos;
 
 /// 100 prevents too many file handles from being open
 const NUM_FILE_THREADS: usize = 100;
@@ -42,6 +51,82 @@ const PRE_HEADER_SIZE: usize = 8;
 type UnspentFilter = ScalableCuckooFilter<OutPoint>;
 type ResultBlock = Result<ParsedBlock>;
 
+pub struct Block2 {
+    /// List of transactions contained in the block
+    pub txdata: Vec<Transaction2>,
+}
+
+impl Block2 {
+    fn decode<R: BufRead + ?Sized + Seek>(r: &mut R) -> std::result::Result<Self, encode::Error> {
+        let len = VarInt::consensus_decode_from_finite_reader(r)?.0;
+        let max_capacity = MAX_VEC_SIZE / 4 / mem::size_of::<Transaction2>();
+        let mut ret = Vec::with_capacity(core::cmp::min(len as usize, max_capacity));
+        for _ in 0..len {
+            ret.push(Transaction2::decode(r)?);
+        }
+        Ok(Self { txdata: ret })
+    }
+}
+
+pub struct Transaction2 {
+    pub version: Version,
+    pub input: Vec<TxIn>,
+    pub output: Vec<TxOut>,
+    pub lock_time: absolute::LockTime,
+}
+
+impl Transaction2 {
+    fn decode<R: BufRead + ?Sized + Seek>(r: &mut R) -> Result<Self, encode::Error> {
+        let version = Version::consensus_decode_from_finite_reader(r)?;
+        let input = Vec::<TxIn>::consensus_decode_from_finite_reader(r)?;
+        // segwit
+        if input.is_empty() {
+            let segwit_flag = u8::consensus_decode_from_finite_reader(r)?;
+            match segwit_flag {
+                // BIP144 input witnesses
+                1 => {
+                    let mut input = Vec::<TxIn>::consensus_decode_from_finite_reader(r)?;
+                    let output = Vec::<TxOut>::consensus_decode_from_finite_reader(r)?;
+                    for txin in input.iter_mut() {
+                        witness(r)?;
+                        // txin.witness = Decodable::consensus_decode_from_finite_reader(r)?;
+                    }
+                    Ok(Transaction2 {
+                        version,
+                        input,
+                        output,
+                        lock_time: Decodable::consensus_decode_from_finite_reader(r)?,
+                    })
+                }
+                // We don't support anything else
+                x => Err(encode::Error::UnsupportedSegwitFlag(x)),
+            }
+        // non-segwit
+        } else {
+            Ok(Transaction2 {
+                version,
+                input,
+                output: Decodable::consensus_decode_from_finite_reader(r)?,
+                lock_time: Decodable::consensus_decode_from_finite_reader(r)?,
+            })
+        }
+    }
+}
+
+fn witness<R: BufRead + ?Sized + Seek>(r: &mut R) -> std::result::Result<(), Error> {
+    let witness_elements = VarInt::consensus_decode(r)?.0 as usize;
+    if witness_elements == 0 {
+        Ok(())
+    } else {
+        for i in 0..witness_elements {
+            let element_size_varint = VarInt::consensus_decode(r)?;
+            let element_size = element_size_varint.0 as usize;
+
+            r.seek_relative(element_size as i64).unwrap();
+        }
+        Ok(())
+    }
+}
 /// Contains a block that has been parsed and additional metadata we have derived about it
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ParsedBlock {
@@ -99,22 +184,27 @@ impl BlockParser {
         }
     }
 
-    /// Parses all the blocks without providing any of the input/output metadata
+    /// Returns blocks in-order
     pub fn parse(&self) -> Receiver<ResultBlock> {
         self.parse_ordered(None)
     }
 
-    /// Parses the blocks and tracks the input amounts
+    /// Returns blocks in-order
+    pub fn parse2(&self) -> Receiver<Result<Block2>> {
+        self.parse_ordered2(None)
+    }
+
+    /// Returns blocks in-order and tracks the input amounts
     pub fn parse_i(&self) -> Receiver<ResultBlock> {
         self.parse_txin_amounts(None)
     }
 
-    /// Parses the blocks and tracks if outputs are spent/unspent
+    /// Returns blocks in-order and tracks if outputs are spent/unspent
     pub fn parse_o(&self, filter_file: &str) -> Receiver<ResultBlock> {
         self.parse_ordered(Some(filter_file.to_string()))
     }
 
-    /// Parses the blocks and tracks the input amounts and if outputs are spent/unspent
+    /// Returns blocks in-order and tracks the input amounts and if outputs are spent/unspent
     pub fn parse_io(&self, filter_file: &str) -> Receiver<ResultBlock> {
         self.parse_txin_amounts(Some(filter_file.to_string()))
     }
@@ -170,6 +260,68 @@ impl BlockParser {
         rx
     }
 
+    /// Parses the blocks, returning them in the order they were passed in.
+    fn parse_ordered2(&self, filter_file: Option<String>) -> Receiver<Result<Block2>> {
+        let (tx_blocks, rx_blocks) = mpsc::sync_channel(BLOCK_BUFFER);
+        let pool = ThreadPool::new(NUM_FILE_THREADS);
+
+        // Spawns threads for parsing blocks from disk in parallel (current bottleneck is the I/O here)
+        for (index, location) in self.locations.clone().into_iter().enumerate() {
+            let tx = tx_blocks.clone();
+            pool.execute(move || {
+                let _ = tx.send((index as u32, Self::parse_block2(location)));
+            });
+        }
+        drop(tx_blocks);
+
+        // Spawn a thread that will order the blocks
+        let (tx, rx) = mpsc::sync_channel(BLOCK_BUFFER);
+        thread::spawn(move || {
+            if let Err(e) = Self::parse_ordered_helper2(filter_file, tx.clone(), rx_blocks) {
+                let _ = tx.send(Err(e));
+            }
+        });
+        rx
+    }
+
+    fn parse_ordered_helper2(
+        filter_file: Option<String>,
+        tx: SyncSender<Result<Block2>>,
+        rx: Receiver<(u32, Result<Block2>)>,
+    ) -> Result<()> {
+        let filter = match filter_file {
+            None => None,
+            Some(file) => {
+                let mut reader = BufReader::new(File::open(file)?);
+                let mut buffer = vec![];
+                reader.read_to_end(&mut buffer)?;
+                let filter: UnspentFilter = postcard::from_bytes(&buffer)?;
+                Some(filter)
+            }
+        };
+
+        let mut current_index = 0;
+        let mut unordered = FxHashMap::default();
+        let start = Instant::now();
+        for (index, block) in rx {
+            unordered.insert(index, block);
+
+            // Get all the ordered blocks
+            while let Some(parsed) = unordered.remove(&current_index) {
+                current_index += 1;
+                let _ = tx.send(parsed);
+
+                if current_index % LOG_BLOCKS == 0 {
+                    let elapsed = (Instant::now() - start).as_secs();
+                    print!("{}0K blocks parsed,", current_index / LOG_BLOCKS);
+                    println!(" {}m{}s elapsed", elapsed / 60, elapsed % 60);
+                }
+            }
+        }
+        println!("Parsed {} total blocks", current_index);
+        Ok(())
+    }
+
     fn parse_ordered_helper(
         filter_file: Option<String>,
         tx: SyncSender<ResultBlock>,
@@ -195,7 +347,7 @@ impl BlockParser {
             // Get all the ordered blocks
             while let Some(parsed) = unordered.remove(&current_index) {
                 current_index += 1;
-                let _ = tx.send(Self::update_outputs(parsed, &filter));
+                let _ = tx.send(parsed);
 
                 if current_index % LOG_BLOCKS == 0 {
                     let elapsed = (Instant::now() - start).as_secs();
@@ -295,6 +447,13 @@ impl BlockParser {
         }
     }
 
+    fn parse_block2(location: BlockLocation) -> Result<Block2> {
+        let mut reader = BufReader::new(File::open(&location.path)?);
+        reader.seek_relative(location.offset as i64)?;
+        let block = Block2::decode(&mut reader)?;
+        Ok(block)
+    }
+
     /// Parses a block from a `BlockLocation` into a `ParsedBlock`
     fn parse_block(location: BlockLocation) -> ResultBlock {
         let mut reader = BufReader::new(File::open(&location.path)?);
@@ -382,7 +541,7 @@ impl BlockLocation {
             offset += buffer.len();
             if let Ok(header) = Header::consensus_decode(&mut reader) {
                 headers.push(BlockLocation {
-                    offset,
+                    offset: offset + HEADER_SIZE,
                     prev: header.prev_blockhash,
                     hash: header.block_hash(),
                     path: path.clone(),
