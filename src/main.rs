@@ -49,7 +49,7 @@ fn main() -> Result<()> {
             for parsed in parser.parse_i() {
                 let parsed = parsed?;
                 for (tx, txid) in parsed.transactions() {
-                    assert_eq!(tx.input.len(), parsed.input_amount(&txid)?.len());
+                    assert_eq!(tx.input.len(), parsed.input_amount(txid)?.len());
                 }
             }
         }
@@ -57,7 +57,7 @@ fn main() -> Result<()> {
             for parsed in parser.parse_o(&args.filter_file) {
                 let parsed = parsed?;
                 for (tx, txid) in parsed.transactions() {
-                    assert_eq!(tx.output.len(), parsed.output_status(&txid)?.len());
+                    assert_eq!(tx.output.len(), parsed.output_status(txid)?.len());
                 }
             }
         }
@@ -65,8 +65,8 @@ fn main() -> Result<()> {
             for parsed in parser.parse_io(&args.filter_file) {
                 let parsed = parsed?;
                 for (tx, txid) in parsed.transactions() {
-                    assert_eq!(tx.output.len(), parsed.output_status(&txid)?.len());
-                    assert_eq!(tx.input.len(), parsed.input_amount(&txid)?.len());
+                    assert_eq!(tx.output.len(), parsed.output_status(txid)?.len());
+                    assert_eq!(tx.input.len(), parsed.input_amount(txid)?.len());
                 }
             }
         }
@@ -99,7 +99,7 @@ fn test(blocks_dir: &str, filter_file: &str) -> Result<()> {
                 let mut status = vec![OutStatus::Spent; 7];
                 status[2] = OutStatus::Unspent;
                 assert_eq!(parsed.block.block_hash(), test_block);
-                assert_eq!(*parsed.output_status(&txid)?, status);
+                assert_eq!(*parsed.output_status(txid)?, status);
             }
         }
     }
@@ -112,7 +112,7 @@ fn test(blocks_dir: &str, filter_file: &str) -> Result<()> {
         let parsed = parsed?;
         for (_, txid) in parsed.transactions() {
             if *txid == test_txid {
-                assert_eq!(*parsed.input_amount(&txid)?, amounts);
+                assert_eq!(*parsed.input_amount(txid)?, amounts);
             }
         }
     }
@@ -122,7 +122,7 @@ fn test(blocks_dir: &str, filter_file: &str) -> Result<()> {
         let parsed = parsed?;
         for (_, txid) in parsed.transactions() {
             if *txid == test_txid {
-                assert_eq!(*parsed.input_amount(&txid)?, amounts);
+                assert_eq!(*parsed.input_amount(txid)?, amounts);
             }
         }
     }

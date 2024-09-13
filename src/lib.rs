@@ -1,3 +1,6 @@
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
+
 use anyhow::Result;
 use anyhow::{anyhow, bail};
 use bitcoin::block::Header;
@@ -42,6 +45,7 @@ type ResultBlock = Result<ParsedBlock>;
 /// Contains a block that has been parsed and additional metadata we have derived about it
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ParsedBlock {
+    /// Underlying parsed block from `bitcoin::Block`
     pub block: Block,
     /// Precomputed txids for every transaction
     txids: Vec<Txid>,
@@ -57,13 +61,13 @@ impl ParsedBlock {
     }
 
     /// Given a tx in this block, return the in-order list of whether the output was spent/unspent
-    /// Currently not checked at compile-time since the multithreading makes the implementation difficult
+    // TODO: Currently not checked at compile-time since the multithreading makes the implementation difficult
     pub fn output_status(&self, txid: &Txid) -> Result<&Vec<OutStatus>> {
         self.output_status.get(txid).ok_or(anyhow!("Output status not found, try calling parse_o() or parse_io()"))
     }
 
     /// Given a tx in this block, return the in-order list of the input amounts
-    /// Currently not checked at compile-time since the multithreading makes the implementation difficult
+    // TODO: Currently not checked at compile-time since the multithreading makes the implementation difficult
     pub fn input_amount(&self, txid: &Txid) -> Result<&Vec<Amount>> {
         self.input_amounts.get(txid).ok_or(anyhow!("Input amount not found, try calling parse_i() or parse_io()"))
     }
@@ -241,7 +245,7 @@ impl BlockParser {
                 for (index, output) in tx.output.iter().enumerate() {
                     let outpoint = OutPoint::new(*txid, index as u32);
                     // cache the output amount (if it's not an unspent output)
-                    match parsed.output_status(&txid).ok().and_then(|status| status.get(index)) {
+                    match parsed.output_status(txid).ok().and_then(|status| status.get(index)) {
                         Some(OutStatus::Unspent) => {},
                         _ => { outpoints.insert(Self::truncate(&outpoint), output.value); }
                     }

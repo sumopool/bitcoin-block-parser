@@ -9,6 +9,7 @@ readme = "README.md"
 description = "Fast optimized parser for the bitcoin `blocks` data with UTXO tracking."
 categories = ["cryptography::cryptocurrencies"]
 keywords = [ "crypto", "bitcoin" ]
+documentation = "https://docs.rs/bitcoin-block-parser"
 
 [dependencies]
 bitcoin = "0.32.2"
