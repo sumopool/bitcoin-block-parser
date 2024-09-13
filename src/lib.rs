@@ -63,13 +63,17 @@ impl ParsedBlock {
     /// Given a tx in this block, return the in-order list of whether the output was spent/unspent
     // TODO: Currently not checked at compile-time since the multithreading makes the implementation difficult
     pub fn output_status(&self, txid: &Txid) -> Result<&Vec<OutStatus>> {
-        self.output_status.get(txid).ok_or(anyhow!("Output status not found, try calling parse_o() or parse_io()"))
+        self.output_status.get(txid).ok_or(anyhow!(
+            "Output status not found, try calling parse_o() or parse_io()"
+        ))
     }
 
     /// Given a tx in this block, return the in-order list of the input amounts
     // TODO: Currently not checked at compile-time since the multithreading makes the implementation difficult
     pub fn input_amount(&self, txid: &Txid) -> Result<&Vec<Amount>> {
-        self.input_amounts.get(txid).ok_or(anyhow!("Input amount not found, try calling parse_i() or parse_io()"))
+        self.input_amounts.get(txid).ok_or(anyhow!(
+            "Input amount not found, try calling parse_i() or parse_io()"
+        ))
     }
 }
 
@@ -79,35 +83,39 @@ pub enum OutStatus {
     /// The output was spent in a later block
     Spent,
     /// The output was never spent in any of the blocks we parsed
-    Unspent
+    Unspent,
 }
 
 /// Contains all the block parsing functions
 pub struct BlockParser {
-    locations: Vec<BlockLocation>
+    locations: Vec<BlockLocation>,
 }
 
 impl BlockParser {
     /// Create a new parser, allowing users to select a range or re-order blocks
-    pub fn new(locations: &[BlockLocation]) -> Self { Self { locations: locations.to_vec() } }
+    pub fn new(locations: &[BlockLocation]) -> Self {
+        Self {
+            locations: locations.to_vec(),
+        }
+    }
 
     /// Parses all the blocks without providing any of the input/output metadata
-    pub fn parse(&self)  -> Receiver<ResultBlock> {
+    pub fn parse(&self) -> Receiver<ResultBlock> {
         self.parse_ordered(None)
     }
 
     /// Parses the blocks and tracks the input amounts
-    pub fn parse_i(&self)  -> Receiver<ResultBlock> {
+    pub fn parse_i(&self) -> Receiver<ResultBlock> {
         self.parse_txin_amounts(None)
     }
 
     /// Parses the blocks and tracks if outputs are spent/unspent
-    pub fn parse_o(&self, filter_file: &str)  -> Receiver<ResultBlock> {
+    pub fn parse_o(&self, filter_file: &str) -> Receiver<ResultBlock> {
         self.parse_ordered(Some(filter_file.to_string()))
     }
 
     /// Parses the blocks and tracks the input amounts and if outputs are spent/unspent
-    pub fn parse_io(&self, filter_file: &str)  -> Receiver<ResultBlock> {
+    pub fn parse_io(&self, filter_file: &str) -> Receiver<ResultBlock> {
         self.parse_txin_amounts(Some(filter_file.to_string()))
     }
 
@@ -162,9 +170,11 @@ impl BlockParser {
         rx
     }
 
-    fn parse_ordered_helper(filter_file: Option<String>,
-                            tx: SyncSender<ResultBlock>,
-                            rx: Receiver<(u32, ResultBlock)>) -> Result<()> {
+    fn parse_ordered_helper(
+        filter_file: Option<String>,
+        tx: SyncSender<ResultBlock>,
+        rx: Receiver<(u32, ResultBlock)>,
+    ) -> Result<()> {
         let filter = match filter_file {
             None => None,
             Some(file) => {
@@ -234,7 +244,10 @@ impl BlockParser {
         rx
     }
 
-    fn parse_txin_amounts_helper(tx: SyncSender<ResultBlock>, rx: Receiver<ResultBlock>) -> Result<()> {
+    fn parse_txin_amounts_helper(
+        tx: SyncSender<ResultBlock>,
+        rx: Receiver<ResultBlock>,
+    ) -> Result<()> {
         let mut outpoints = FxHashMap::default();
 
         for parsed in rx {
@@ -243,17 +256,22 @@ impl BlockParser {
 
             for (tx, txid) in parsed.transactions() {
                 for (index, output) in tx.output.iter().enumerate() {
-                    let outpoint = OutPoint::new(*txid, index as u32);
+                    let outpoint = Self::truncate(&OutPoint::new(*txid, index as u32));
+                    let statuses = parsed.output_status(txid).ok();
+
                     // cache the output amount (if it's not an unspent output)
-                    match parsed.output_status(txid).ok().and_then(|status| status.get(index)) {
-                        Some(OutStatus::Unspent) => {},
-                        _ => { outpoints.insert(Self::truncate(&outpoint), output.value); }
+                    match statuses.and_then(|status| status.get(index)) {
+                        Some(OutStatus::Unspent) => {}
+                        _ => {
+                            outpoints.insert(outpoint, output.value);
+                        }
                     }
                 }
 
                 for input in &tx.input {
                     let entry = input_amounts.entry(*txid).or_default();
-                    if let Some(amount) = outpoints.remove(&Self::truncate(&input.previous_output)) {
+                    let outpoint = Self::truncate(&input.previous_output);
+                    if let Some(amount) = outpoints.remove(&outpoint) {
                         entry.push(amount);
                     } else if tx.is_coinbase() {
                         entry.push(Amount::ZERO);
@@ -273,7 +291,7 @@ impl BlockParser {
     fn check_genesis(&self) -> Result<()> {
         match self.locations.first() {
             Some(first) if first.prev == BlockHash::all_zeros() => Ok(()),
-            _ => bail!("Calling this function must start at the genesis block")
+            _ => bail!("Calling this function must start at the genesis block"),
         }
     }
 
@@ -386,7 +404,10 @@ impl BlockLocation {
 
         for file in read_dir {
             let file = file?;
-            let name = file.file_name().into_string().expect("Could not parse filename");
+            let name = file
+                .file_name()
+                .into_string()
+                .expect("Could not parse filename");
             if name.starts_with("blk") {
                 files.push(file.path())
             }
@@ -400,7 +421,10 @@ impl BlockLocation {
     }
 
     /// In case of reorgs we need to resolve to the longest chain
-    fn resolve_collisions(headers: &mut HashMap<BlockHash, BlockLocation>, collision: BlockLocation) {
+    fn resolve_collisions(
+        headers: &mut HashMap<BlockHash, BlockLocation>,
+        collision: BlockLocation,
+    ) {
         let existing = headers.get(&collision.prev).expect("exists");
         let mut e_hash = &existing.hash;
         let mut c_hash = &collision.hash;
