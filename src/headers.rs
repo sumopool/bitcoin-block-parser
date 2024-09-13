@@ -1,4 +1,3 @@
-use crate::NUM_FILE_THREADS;
 use anyhow::bail;
 use anyhow::Result;
 use bitcoin::block::Header;
@@ -8,7 +7,7 @@ use bitcoin::BlockHash;
 use rustc_hash::FxHashMap;
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use threadpool::ThreadPool;
@@ -29,13 +28,14 @@ pub struct ParsedHeader {
     pub path: PathBuf,
 }
 
+/// Fast parser of [`ParsedHeader`] from the blocks directory
 pub struct HeaderParser;
 impl HeaderParser {
     /// Parses the headers from the `blocks_dir` returning the `ParsedHeader` in height order,
     /// starting from the genesis block.  Takes a few seconds to run.
     pub fn parse(blocks_dir: &str) -> Result<Vec<ParsedHeader>> {
         let (tx, rx) = mpsc::channel();
-        let pool = ThreadPool::new(NUM_FILE_THREADS);
+        let pool = ThreadPool::new(100);
 
         // Read headers from every BLK file in a new thread
         for path in Self::blk_files(blocks_dir)? {
