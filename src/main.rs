@@ -1,9 +1,13 @@
 use anyhow::Result;
 use bitcoin::{Amount, BlockHash, Txid};
+use bitcoin_block_parser::blocks::{BlockParser2, DefaultParser};
+use bitcoin_block_parser::headers::HeaderParser;
+use bitcoin_block_parser::utxos::FilterParser;
 use bitcoin_block_parser::{BlockLocation, BlockParser, OutStatus};
 use clap::{Parser, ValueEnum};
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Instant;
 
 /// Example program that can perform self-tests and benchmarks
 #[derive(Parser, Debug)]
@@ -33,47 +37,55 @@ enum Function {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
-    let mut locations = BlockLocation::parse(&args.input)?;
-    locations.truncate(300_000);
-    let parser = BlockParser::new(&locations);
-    match args.run {
-        Function::WriteFilter => {
-            parser.write_filter(&args.filter_file)?;
-        }
-        Function::Parse => {
-            for parsed in parser.parse() {
-                let parsed = parsed?;
-                for (_, _) in parsed.transactions() {}
-            }
-        }
-        Function::ParseI => {
-            for parsed in parser.parse_i() {
-                let parsed = parsed?;
-                for (tx, txid) in parsed.transactions() {
-                    assert_eq!(tx.input.len(), parsed.input_amount(txid)?.len());
-                }
-            }
-        }
-        Function::ParseO => {
-            for parsed in parser.parse_o(&args.filter_file) {
-                let parsed = parsed?;
-                for (tx, txid) in parsed.transactions() {
-                    assert_eq!(tx.output.len(), parsed.output_status(txid)?.len());
-                }
-            }
-        }
-        Function::ParseIO => {
-            for parsed in parser.parse_io(&args.filter_file) {
-                let parsed = parsed?;
-                for (tx, txid) in parsed.transactions() {
-                    assert_eq!(tx.output.len(), parsed.output_status(txid)?.len());
-                    assert_eq!(tx.input.len(), parsed.input_amount(txid)?.len());
-                }
-            }
-        }
-        Function::Test => test(&args.input, &args.filter_file)?,
+    let mut headers = HeaderParser::parse(&"/home/s/blocks")?;
+    headers.truncate(100);
+
+    // let filter = FilterParser::new();
+    for block in DefaultParser.parse_ordered(&headers) {
+        println!("{:?}", block?.block_hash())
     }
+    // filter.write("filter.bin")?;
+
+    // let args = Args::parse();
+    // let mut locations = BlockLocation::parse(&args.input)?;
+    // locations.truncate(850_000);
+    // let parser = BlockParser::new(&locations);
+    // match args.run {
+    //     Function::WriteFilter => {
+    //         parser.write_filter(&args.filter_file)?;
+    //     }
+    //     Function::Parse => {
+    //         for parsed in parser.parse2() {
+    //             let parsed = parsed?;
+    //         }
+    //     }
+    //     Function::ParseI => {
+    //         for parsed in parser.parse_i() {
+    //             let parsed = parsed?;
+    //             for (tx, txid) in parsed.transactions() {
+    //                 assert_eq!(tx.input.len(), parsed.input_amount(txid)?.len());
+    //             }
+    //         }
+    //     }
+    //     Function::ParseO => {
+    //         for parsed in parser.parse_o(&args.filter_file) {
+    //             let parsed = parsed?;
+    //             for (tx, txid) in parsed.transactions() {
+    //                 assert_eq!(tx.output.len(), parsed.output_status(txid)?.len());
+    //             }
+    //         }
+    //     }
+    //     Function::ParseIO => {
+    //         for parsed in parser.parse_io(&args.filter_file) {
+    //             let parsed = parsed?;
+    //             for (tx, txid) in parsed.transactions() {
+    //                 assert_eq!(tx.output.len(), parsed.output_status(txid)?.len());
+    //                 assert_eq!(tx.input.len(), parsed.input_amount(txid)?.len());
+    //             }
+    //         }
+    //     }
+    //     Function::Test => test(&args.input, &args.filter_file)?,
+    // }
     Ok(())
 }
 
