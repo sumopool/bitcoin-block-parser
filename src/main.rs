@@ -1,13 +1,12 @@
 use anyhow::Result;
-use bitcoin::{Amount, BlockHash, Txid};
-use bitcoin_block_parser::blocks::{BlockParser2, DefaultParser};
+use bitcoin::{Amount, BlockHash, Transaction, Txid};
+use bitcoin_block_parser::blocks::{BlockParser, DefaultParser};
 use bitcoin_block_parser::headers::HeaderParser;
-use bitcoin_block_parser::utxos::FilterParser;
-use bitcoin_block_parser::{BlockLocation, BlockParser, OutStatus};
+use bitcoin_block_parser::utxos::{FilterParser, OutStatus, UtxoParser};
 use clap::{Parser, ValueEnum};
-use std::path::Path;
 use std::str::FromStr;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Example program that can perform self-tests and benchmarks
 #[derive(Parser, Debug)]
@@ -28,185 +27,94 @@ struct Args {
 /// Types of functions we can run
 #[derive(ValueEnum, Clone, Debug)]
 enum Function {
-    WriteFilter,
-    Parse,
-    ParseO,
-    ParseI,
-    ParseIO,
+    /// Runs a self-test
     Test,
+    /// [`FilterParser`] benchmark writing a filter
+    Filter,
+    /// [`UtxoParser`] benchmark parsing the UTXOs
+    Utxo,
+    /// [`DefaultParser::parse`] benchmark for all blocks unordered
+    Unordered,
+    /// [`DefaultParser::parse_ordered`] benchmark for all blocks ordered
+    Ordered,
 }
 
 fn main() -> Result<()> {
-    let mut headers = HeaderParser::parse(&"/home/s/blocks")?;
-    headers.truncate(100);
+    let args = Args::parse();
+    let mut headers = HeaderParser::parse(&args.input)?;
+    headers.truncate(850_000);
 
-    // let filter = FilterParser::new();
-    for block in DefaultParser.parse_ordered(&headers) {
-        println!("{:?}", block?.block_hash())
+    match args.run {
+        Function::Test => test(args)?,
+        Function::Filter => {
+            let parser = FilterParser::new();
+            for _ in parser.parse(&headers) {}
+            parser.write(&args.filter_file)?;
+        }
+        Function::Utxo => {
+            let parser = UtxoParser::new(&args.filter_file)?;
+            for block in parser.parse(&headers) {
+                let block = block?;
+                for (tx, txid) in block.transactions() {
+                    assert_eq!(tx.output.len(), block.output_status(txid).len());
+                    assert_eq!(tx.input.len(), block.input_amount(txid).len());
+                }
+            }
+        }
+        Function::Unordered => for _ in DefaultParser.parse(&headers) {},
+        Function::Ordered => for _ in DefaultParser.parse_ordered(&headers) {},
     }
-    // filter.write("filter.bin")?;
-
-    // let args = Args::parse();
-    // let mut locations = BlockLocation::parse(&args.input)?;
-    // locations.truncate(850_000);
-    // let parser = BlockParser::new(&locations);
-    // match args.run {
-    //     Function::WriteFilter => {
-    //         parser.write_filter(&args.filter_file)?;
-    //     }
-    //     Function::Parse => {
-    //         for parsed in parser.parse2() {
-    //             let parsed = parsed?;
-    //         }
-    //     }
-    //     Function::ParseI => {
-    //         for parsed in parser.parse_i() {
-    //             let parsed = parsed?;
-    //             for (tx, txid) in parsed.transactions() {
-    //                 assert_eq!(tx.input.len(), parsed.input_amount(txid)?.len());
-    //             }
-    //         }
-    //     }
-    //     Function::ParseO => {
-    //         for parsed in parser.parse_o(&args.filter_file) {
-    //             let parsed = parsed?;
-    //             for (tx, txid) in parsed.transactions() {
-    //                 assert_eq!(tx.output.len(), parsed.output_status(txid)?.len());
-    //             }
-    //         }
-    //     }
-    //     Function::ParseIO => {
-    //         for parsed in parser.parse_io(&args.filter_file) {
-    //             let parsed = parsed?;
-    //             for (tx, txid) in parsed.transactions() {
-    //                 assert_eq!(tx.output.len(), parsed.output_status(txid)?.len());
-    //                 assert_eq!(tx.input.len(), parsed.input_amount(txid)?.len());
-    //             }
-    //         }
-    //     }
-    //     Function::Test => test(&args.input, &args.filter_file)?,
-    // }
     Ok(())
 }
 
 /// Integration test based off of real mainchain data
-fn test(blocks_dir: &str, filter_file: &str) -> Result<()> {
+fn test(args: Args) -> Result<()> {
     // Create a filter if one doesn't yet exist
-    let mut locations = BlockLocation::parse(blocks_dir)?;
-    let parser = BlockParser::new(&locations);
-    if !Path::new(filter_file).exists() {
-        println!("\nTesting write_filter");
-        parser.write_filter(filter_file)?;
-    }
+    let mut headers = HeaderParser::parse(&args.input)?;
+    // Truncate so we can capture the spends, but also run faster
+    headers.truncate(151_000);
 
-    // Truncate blocks so we can run the tests quickly
-    locations.truncate(150_000);
+    let parser = FilterParser::new();
+    println!("\nTesting write_filter");
+    for _ in parser.parse(&headers) {}
+    parser.write(&args.filter_file)?;
 
-    println!("\nTesting parse_o");
+    println!("\nTesting UtxoParser");
     let test_block =
-        BlockHash::from_str("0000000000000aff9f826ed90c99e0aeb673e22494e830fecde4113a6bc264af")?;
-    let test_txid =
-        Txid::from_str("3045a3b13be965622fb5d1652a810e39dca28913f495604f99de6ffb9f71f587")?;
-    let parser = BlockParser::new(&locations);
-    for parsed in parser.parse_o(filter_file) {
-        let parsed = parsed?;
-        for (_, txid) in parsed.transactions() {
-            if *txid == test_txid {
-                let mut status = vec![OutStatus::Spent; 7];
-                status[2] = OutStatus::Unspent;
-                assert_eq!(parsed.block.block_hash(), test_block);
-                assert_eq!(*parsed.output_status(txid)?, status);
-            }
-        }
-    }
-
-    println!("\nTesting parse_i");
-    let test_txid =
+        BlockHash::from_str("00000000000008df4269884f1d3bfc2aed3ea747292abb89be3dc3faa8c5d26f")?;
+    let test_txid1 =
+        Txid::from_str("062ed26778b8d0794c269029ee7b1d56b4ecaa379048b21298bf6d35876d00c4")?;
+    let test_txid2 =
         Txid::from_str("cf2cc1897eb061e2406e644ecee3c26ee64cfadcc626890438c3d058511c9094")?;
-    let parser = BlockParser::new(&locations);
-    let amounts = vec![
-        sat(56892597),
-        sat(274000000),
-        sat(248000000),
-        sat(14832476),
-        sat(48506744443),
-    ];
-    for parsed in parser.parse_i() {
-        let parsed = parsed?;
-        for (_, txid) in parsed.transactions() {
-            if *txid == test_txid {
-                assert_eq!(*parsed.input_amount(txid)?, amounts);
+
+    let parser = UtxoParser::new(&args.filter_file)?;
+    for block in parser.parse(&headers) {
+        let block = block?;
+        for (_, txid) in block.transactions() {
+            // Verify spent UTXO #2 tx here https://mempool.space/tx/062ed26778b8d0794c269029ee7b1d56b4ecaa379048b21298bf6d35876d00c4
+            if *txid == test_txid1 {
+                let mut status = vec![OutStatus::Unspent; 3];
+                status[2] = OutStatus::Spent;
+                assert_eq!(block.block.block_hash(), test_block);
+                assert_eq!(*block.output_status(txid), status);
+            }
+            // Verify tx amounts here https://mempool.space/tx/cf2cc1897eb061e2406e644ecee3c26ee64cfadcc626890438c3d058511c9094
+            if *txid == test_txid2 {
+                let amounts = vec![
+                    sat(56892597),
+                    sat(274000000),
+                    sat(248000000),
+                    sat(14832476),
+                    sat(48506744443),
+                ];
+                assert_eq!(*block.input_amount(txid), amounts);
             }
         }
     }
-
-    println!("\nTesting parse_io");
-    for parsed in parser.parse_io(filter_file) {
-        let parsed = parsed?;
-        for (_, txid) in parsed.transactions() {
-            if *txid == test_txid {
-                assert_eq!(*parsed.input_amount(txid)?, amounts);
-            }
-        }
-    }
-
+    println!("Test successful!");
     Ok(())
 }
 
 fn sat(amt: u64) -> Amount {
     Amount::from_sat(amt)
-}
-
-#[allow(dead_code, unused_variables)]
-fn example() -> Result<()> {
-    // Load all the block locations from the headers of the block files
-    let locations = BlockLocation::parse("/home/user/.bitcoin/blocks")?;
-    // Create a parser from a slice of the first 100K blocks
-    let parser = BlockParser::new(&locations[0..100_000]);
-    // Iterates over all the blocks in height order
-    for parsed in parser.parse() {
-        // Do whatever you want with the parsed block here
-        parsed?.block.check_witness_commitment();
-    }
-
-    // `parse_i()` provides the input amounts for all transactions
-    for parsed in parser.parse_i() {
-        // Any parsing errors will be returned here
-        let parsed = parsed.expect("parsing failed");
-        // Iterate over all transactions (txid is computed by the parser)
-        for (tx, txid) in parsed.transactions() {
-            // Iterate over all the inputs in the transaction
-            let mut total_amount: Amount = Amount::ZERO;
-            for (amount, input) in parsed.input_amount(txid)?.iter().zip(tx.input.iter()) {
-                // Do whatever you want with the input amount
-                total_amount += *amount;
-            }
-        }
-    }
-
-    // We have to write filter before getting any output information
-    parser.write_filter("filter.bin")?;
-    // `parse_o()` provides whether the output was spent or unspent for all transactions
-    for parsed in parser.parse_o("filter.bin") {
-        // Any parsing errors will be returned here
-        let parsed = parsed.expect("parsing failed");
-        // Iterate over all transactions (txid is computed by the parser)
-        for (tx, txid) in parsed.transactions() {
-            // Iterate over all the outputs in the transaction
-            for (status, output) in parsed.output_status(txid)?.iter().zip(tx.output.iter()) {
-                // Do whatever you want with the output status
-                match status {
-                    OutStatus::Unspent => {}
-                    OutStatus::Spent => {}
-                }
-            }
-        }
-    }
-
-    // If we already wrote the filter file we don't need to write it again for the same blocks
-    for parsed in parser.parse_io("filter.bin") {
-        // Do whatever you want with output status and input amounts
-    }
-
-    Ok(())
 }
