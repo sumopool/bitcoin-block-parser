@@ -1,80 +1,84 @@
 //! The [`BlockParser`] trait allows you to implement a custom parser or use one of the predefined ones.
 //!
-//! For example, imagine you want to take the biggest tx using [`Transaction::total_size`] from the
-//! first 600K blocks and sum their output [`Amount`].
+//! For example, imagine you want to take the biggest tx using [`Transaction::total_size`] from
+//! every block and sum their output [`Amount`].
 //!
 //! You can use the [`DefaultParser`] to simply iterate over the [`Block`]:
-//! ```
+//! ```no_run
 //! use bitcoin_block_parser::*;
 //!
-//! let mut headers = HeaderParser::parse("/path/to/blocks")?;
 //! let mut amount = bitcoin::Amount::ZERO;
-//!     for block in DefaultParser.parse(&headers[..600_000]) {
-//!         let txs = block?.txdata;
-//!         let max = txs.into_iter().max_by_key(|tx| tx.total_size());
-//!         for output in max.unwrap().output {
-//!             amount += output.value;
-//!         }
+//! for block in DefaultParser.parse_dir("/path/to/blocks").unwrap() {
+//!     let txs = block.unwrap().txdata;
+//!     let max = txs.into_iter().max_by_key(|tx| tx.total_size());
+//!     for output in max.unwrap().output {
+//!         amount += output.value;
 //!     }
-//!     println!("Sum of txids: {}", amount);
+//! }
+//! println!("Sum of txids: {}", amount);
+//! ```
+//!
+//! If you only want to run on a subset of blocks use [`HeaderParser`]:
+//! ```no_run
+//! use bitcoin_block_parser::*;
+//!
+//! let headers = HeaderParser::parse("/path/to/blocks").unwrap();
+//! // Skip the first 200,000 blocks
+//! for block in DefaultParser.parse(&headers[200_000..]) {
+//!   // Do whatever you need with the blocks
+//! }
 //! ```
 //!
 //! If you wish to increase performance you may need to implement your own parser.  This example
-//! uses ~2x less memory and time since [`BlockParser::extract`] and [`BlockParser::batch`] reduce
-//! the data size and both run on multiple threads.  The more compute and memory your algorithm uses,
-//! the more you may benefit from this.
-//! ```
+//! uses ~2x less memory and less time since [`BlockParser::extract`] reduces the data size and runs
+//! on multiple threads.  The more compute and memory your algorithm uses, the more you may benefit
+//! from this.
+//! ```no_run
 //! use bitcoin::*;
 //! use bitcoin_block_parser::*;
 //!
 //! #[derive(Clone)]
 //! struct AmountParser;
-//! impl BlockParser<Transaction, Amount> for AmountParser {
-//!     fn extract(&self, block: Block) -> Option<Transaction> {
-//!         block.txdata.into_iter().max_by_key(|tx| tx.total_size())
-//!     }
-//!
-//!     fn batch(&self, items: Vec<Transaction>) -> Vec<Amount> {
-//!         let outputs = items.into_iter().flat_map(|tx| tx.output);
-//!         vec![outputs.map(|output| output.value).sum()]
+//! impl BlockParser<Amount> for AmountParser {
+//!     fn extract(&self, block: Block) -> Vec<Amount> {
+//!         let max = block.txdata.iter().max_by_key(|tx| tx.total_size());
+//!         vec![max.unwrap().output.iter().map(|out| out.value).sum()]
 //!     }
 //! }
 //!
-//! let mut headers = HeaderParser::parse("/path/to/blocks")?;
-//! let receiver = AmountParser.parse(&headers[..600_000]);
+//! let receiver = AmountParser.parse_dir("/path/to/blocks").unwrap();
 //! let amounts: anyhow::Result<Vec<Amount>> = receiver.iter().collect();
-//! println!("Sum of txids: {}", amounts?.into_iter().sum::<Amount>());
+//! println!("Sum of txids: {}", amounts.unwrap().into_iter().sum::<Amount>());
 //! ```
 //!
 //! You can also cache data within your [`BlockParser`] by using an [`Arc`] that will be shared
-//! across all threads.
-//! ```
-//! use std::sync::Arc;
-//! use std::sync::atomic::*;
+//! across all threads.  Updating any locked stated should take place in [`BlockParser::batch`]
+//! to reduce the contention on the lock.
+//! ```no_run
+//! use std::sync::*;
 //! use bitcoin::*;
 //! use bitcoin_block_parser::*;
 //!
 //! #[derive(Clone, Default)]
-//! struct AmountParser(Arc<AtomicU64>);
-//! impl BlockParser<Transaction, Amount> for AmountParser {
-//!     fn extract(&self, block: bitcoin::Block) -> Option<Transaction> {
-//!         block.txdata.into_iter().max_by_key(|tx| tx.total_size())
+//! struct AmountParser(Arc<Mutex<Amount>>);
+//! impl BlockParser<Amount> for AmountParser {
+//!     fn extract(&self, block: bitcoin::Block) -> Vec<Amount> {
+//!         let max = block.txdata.iter().max_by_key(|tx| tx.total_size());
+//!         vec![max.unwrap().output.iter().map(|out| out.value).sum()]
 //!     }
 //!
-//!     fn batch(&self, items: Vec<Transaction>) -> Vec<Amount> {
-//!         let outputs = items.into_iter().flat_map(|tx| tx.output);
-//!         let sum = outputs.map(|output| output.value.to_sat()).sum();
-//!         // Aggregation occurs here
-//!         self.0.fetch_add(sum, Ordering::Relaxed);
+//!     fn batch(&self, items: Vec<Amount>) -> Vec<Amount> {
+//!         let mut sum = self.0.lock().unwrap();
+//!         for item in items {
+//!             *sum += item;
+//!         }
 //!         vec![]
 //!     }
 //! }
 //!
-//! let mut headers = HeaderParser::parse("/path/to/blocks")?;
 //! let parser = AmountParser::default();
-//! for _ in parser.parse(&headers[..600_000]) {}
-//! let sum = Amount::from_sat(parser.0.fetch_add(0, Ordering::Relaxed));
-//! println!("Sum of txids: {}", sum);
+//! for _ in parser.parse_dir("/path/to/blocks").unwrap() {}
+//! println!("Sum of txids: {:?}", parser.0);
 //! ```
 
 use crate::headers::ParsedHeader;
@@ -90,47 +94,58 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use threadpool::ThreadPool;
+use crate::HeaderParser;
 
 /// Implement this trait to create a custom [`Block`] parser.
-pub trait BlockParser<B: Send + 'static, C: Send + 'static>: Clone + Send + 'static {
+pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
     /// Extracts the data you need from the block.
     ///
-    /// If you can keep `B` small or return [`None`] you will gain memory/speed performance.
+    /// If you can keep `Vec<B>` small you will gain memory/speed performance.
     /// Always runs on blocks out-of-order using multiple threads so put compute-heavy code in here.
-    fn extract(&self, block: Block) -> Option<B>;
+    fn extract(&self, block: Block) -> Vec<B>;
 
-    /// Runs on batches of the [`BlockParser::extract`] to return the final results.
+    /// Runs on batches of `B` to return the final results, blocks will be in-order if
+    /// [`Options::order_output`] has been set.
     ///
-    /// We batch to reduce contention in the case the parser needs to modify shared state by
-    /// locking an `Arc<Mutex<_>>`.
+    /// Implement batch if your algorithm depends on the order of the blocks or if you need to
+    /// reduce lock contention when accessing shared state in `Arc<Mutex<_>>`.
+    ///
     /// Use [`Options::batch_size`] if you need to tune the number of the `items`.
-    fn batch(&self, items: Vec<B>) -> Vec<C>;
+    fn batch(&self, items: Vec<B>) -> Vec<B> {
+        items
+    }
 
     /// The default [`Options`] that this parser will use.
     ///
-    /// Generally you will want to call [`BlockParser::options`] if you need to modify the default
-    /// options, then pass them into [`BlockParser::parse_with_opts`].
+    /// Implementing  [`BlockParser::options`] allows for tuning of the parameters of the algorithm.
     fn options() -> Options {
         Options::default()
     }
 
     /// Parse all the blocks represented by the headers.
-    fn parse(&self, headers: &[ParsedHeader]) -> Receiver<Result<C>> {
+    fn parse(&self, headers: &[ParsedHeader]) -> Receiver<Result<B>> {
         self.parse_with_opts(headers, Self::options())
     }
 
-    /// Parse all the blocks represented by the headers, ensuring the results `C` are returned
+    /// Parse all the blocks located in the `blocks` directory
+    fn parse_dir(&self, blocks: &str) -> Result<Receiver<Result<B>>> {
+        let headers = HeaderParser::parse(blocks)?;
+        Ok(self.parse(&headers))
+    }
+
+    /// Parse all the blocks represented by the headers, ensuring the results `B` are returned
     /// in the same order the [`ParsedHeader`] were passed in.
     ///
     /// Note that by ordering the results [`BlockParser::batch`] will run on a single thread instead
     /// of multiple which could affect performance.
-    fn parse_ordered(&self, headers: &[ParsedHeader]) -> Receiver<Result<C>> {
+    fn parse_ordered(&self, headers: &[ParsedHeader]) -> Receiver<Result<B>> {
         self.parse_with_opts(headers, Self::options().order_output())
     }
 
     /// Allows users to pass in custom [`Options`] in case they need to reduce memory usage or
-    /// otherwise tune performance for their system.
-    fn parse_with_opts(&self, headers: &[ParsedHeader], opts: Options) -> Receiver<Result<C>> {
+    /// otherwise tune performance for their system.  Users should call [`BlockParser::options`]
+    /// to get the default options associated with the parser first.
+    fn parse_with_opts(&self, headers: &[ParsedHeader], opts: Options) -> Receiver<Result<B>> {
         // Create the batches of headers
         let mut batched: Vec<Vec<ParsedHeader>> = vec![vec![]];
         for header in headers.iter().cloned() {
@@ -151,22 +166,23 @@ pub trait BlockParser<B: Send + 'static, C: Send + 'static>: Clone + Send + 'sta
             let parser = self.clone();
             let num_parsed = num_parsed.clone();
             pool_extract.execute(move || {
-                let mut batch_b = vec![];
+                let mut batch_b: Vec<B> = vec![];
                 for header in headers {
-                    let block = parse_block(header);
-                    increment_log(&num_parsed, start, opts.log_at);
-                    if let Some(b) = block.map(|block| parser.extract(block)).transpose() {
-                        batch_b.push(b);
+                    match parse_block(header) {
+                        Err(e) => {
+                            let _ = tx_b.send((index, Err(e)));
+                        }
+                        Ok(block) => batch_b.extend(parser.extract(block)),
                     }
+                    increment_log(&num_parsed, start, opts.log_at);
                 }
-                let result: Result<Vec<B>> = batch_b.into_iter().collect();
-                let _ = tx_b.send((index, result));
+                let _ = tx_b.send((index, Ok(batch_b)));
             });
         }
 
         if opts.order_output {
             // Spawn a single thread to ensure the output is in order
-            let (tx_c, rx_c) = bounded::<Result<C>>(opts.channel_buffer_size);
+            let (tx_c, rx_c) = bounded::<Result<B>>(opts.channel_buffer_size);
             let parser = self.clone();
             thread::spawn(move || {
                 let mut current_index = 0;
@@ -185,7 +201,7 @@ pub trait BlockParser<B: Send + 'static, C: Send + 'static>: Clone + Send + 'sta
         } else {
             // Spawn multiple threads in the case we don't care about the output order
             let pool_batch = ThreadPool::new(opts.num_threads);
-            let (tx_c, rx_c) = bounded::<Result<C>>(opts.channel_buffer_size);
+            let (tx_c, rx_c) = bounded::<Result<B>>(opts.channel_buffer_size);
             for _ in 0..opts.num_threads {
                 let tx_c = tx_c.clone();
                 let rx_b = rx_b.clone();
@@ -201,7 +217,7 @@ pub trait BlockParser<B: Send + 'static, C: Send + 'static>: Clone + Send + 'sta
     }
 
     /// Helper function for sending batch results in a channel
-    fn send_batch(&self, tx_c: &Sender<Result<C>>, batch: Result<Vec<B>>) {
+    fn send_batch(&self, tx_c: &Sender<Result<B>>, batch: Result<Vec<B>>) {
         let results = match batch.map(|b| self.batch(b)) {
             Ok(c) => c.into_iter().map(|c| Ok(c)).collect(),
             Err(e) => vec![Err(e)],
@@ -236,17 +252,13 @@ fn parse_block(header: ParsedHeader) -> Result<Block> {
 /// Parser that returns [`Block`] for users that don't implement a custom [`BlockParser`]
 #[derive(Clone, Debug)]
 pub struct DefaultParser;
-impl BlockParser<Block, Block> for DefaultParser {
-    fn extract(&self, block: Block) -> Option<Block> {
-        Some(block)
-    }
-
-    fn batch(&self, items: Vec<Block>) -> Vec<Block> {
-        items
+impl BlockParser<Block> for DefaultParser {
+    fn extract(&self, block: Block) -> Vec<Block> {
+        vec![block]
     }
 
     fn options() -> Options {
-        // since we do no batch processing, set batch_size to 1
+        // since we do no batch processing, set batch_size to 1 to reduce memory usage
         Options::default().batch_size(1)
     }
 }
@@ -278,11 +290,11 @@ impl Default for Options {
     }
 }
 impl Options {
-    /// Ensures that the output of the [`BlockParser::parse`] function will be in block height order.
+    /// Ensures that the output of the [`BlockParser::parse`] function will be in same order as the
+    /// [`BlockHeader`] passed in.
     ///
-    /// Some algorithms require [`BlockParser::batch`] to process blocks in-order, however this
-    /// requires running that function in a single thread.
-    /// `BlockParser::extract` will still run multithreaded out-of-order.
+    /// [`BlockParser::batch`] will receive blocks in-order, however this requires running that
+    /// function on a single thread, rather than multiple threads.
     pub fn order_output(mut self) -> Self {
         self.order_output = true;
         self

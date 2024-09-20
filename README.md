@@ -13,12 +13,14 @@
 
 Fast optimized parser for the bitcoin `blocks` data with UTXO tracking.
 
+⚠️ The API is still evolving and should not be considered stable until release `1.0.0`
+
 ## Features
 - Parses blocks into the Rust bitcoin [`Block`](bitcoin::Block) format for easier manipulation
-- Tracks whether any `TxOut` in a `Transaction` is spent or unspent
-- Tracks the `Amount` of every `TxIn` for calculating metrics such as fee rates
-- Uses memory-optimizations, multithreading, and filters to
-  provide the best performance
+- Can track whether any `TxOut` in a `Transaction` is spent or unspent
+- Can track the `Amount` of every `TxIn` for calculating metrics such as fee rates
+- Or implement your own custom multithreaded [`BlockParser`](crate::BlockParser)
+- Uses many optimizations to provide the best block parsing performance
 
 ## Requirements / Benchmarks
 - You must be running a [non-pruning](https://bitcoin.org/en/full-node#reduce-storage) bitcoin node (this is the default configuration)
@@ -41,11 +43,9 @@ Our benchmarks were run on NVMe storage with a 32-thread processor on **850,000*
 ```rust
 use bitcoin_block_parser::*;
 
-// Load all the block locations from the headers of the block files
-let mut headers = HeaderParser::parse("/home/user/.bitcoin/blocks")?;
-// Iterates over all the first 600k blocks
-for block in DefaultParser.parse(&headers[..600_000]) {
+// Iterates over all the blocks in the directory
+for block in DefaultParser.parse_dir("/home/user/.bitcoin/blocks") {
   // Do whatever you want with the parsed block here
-  parsed?.block.check_witness_commitment();
+  block.unwrap().check_witness_commitment();
 }
 ```

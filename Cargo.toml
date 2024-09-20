@@ -1,6 +1,6 @@
 [package]
 name = "bitcoin-block-parser"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Saigo Nanshu"]
 license = "MIT"
@@ -23,3 +23,4 @@ postcard = { version = "1.0.10", features = ["use-std"] }
 scalable_cuckoo_filter = { version = "0.3.2", features = ["serde_support"] }
 clap = { version = "4.5.16", features = ["derive"] }
 rand = {  version = "0.8.5", features = ["small_rng"] }
+serde = { version = "1.0.210", features = ["derive"] }

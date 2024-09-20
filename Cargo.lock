@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-block-parser"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -123,6 +123,7 @@ dependencies = [
  "rand",
  "rustc-hash",
  "scalable_cuckoo_filter",
+ "serde",
  "threadpool",
 ]
 
