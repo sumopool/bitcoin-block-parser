@@ -1,5 +1,16 @@
 # Bitcoin Block Parser
 
+[![Crates.io][crates-badge]][crates-url]
+[![Docs][docs-badge]][docs-url]
+[![MIT licensed][mit-badge]][mit-url]
+
+[crates-badge]: https://img.shields.io/crates/v/bitcoin-block-parser.svg
+[crates-url]: https://crates.io/crates/bitcoin-block-parser
+[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
+[mit-url]: https://github.com/sumopool/bitcoin-block-parser/blob/master/LICENSE
+[docs-badge]: https://img.shields.io/docsrs/bitcoin-block-parser
+[docs-url]: https://docs.rs/bitcoin-block-parser
+
 Fast optimized parser for the bitcoin `blocks` data with UTXO tracking.
 
 ## Features
