@@ -36,15 +36,15 @@ Our benchmarks were run on NVMe storage with a 32-thread processor on **850,000*
 | UtxoParser     | 39 min | 17.5 GB |
 
 ## Quick Usage
-- To parse blocks pass in the `blocks` directory of your bitcoin node and call [parse()](DefaultParser::parse)
-- If your algorithm requires the blocks to be processed in-order use [parse_ordered()](DefaultParser::parse_ordered)
+- To parse blocks pass in the `blocks` directory of your bitcoin node and call [DefaultParser::parse_dir](DefaultParser::parse)
+- If your algorithm requires the blocks to be processed in-order use [InOrderParser::parse_dir](InOrderParser::parse_dir)
 - For examples of how to write custom parsers see the [blocks](crate::blocks) and [utxos](crate::utxos) module docs
 
 ```rust
 use bitcoin_block_parser::*;
 
 // Iterates over all the blocks in the directory
-for block in DefaultParser.parse_dir("/home/user/.bitcoin/blocks") {
+for block in DefaultParser.parse_dir("/home/user/.bitcoin/blocks").unwrap() {
   // Do whatever you want with the parsed block here
   block.unwrap().check_witness_commitment();
 }

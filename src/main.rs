@@ -1,6 +1,6 @@
 use anyhow::Result;
 use bitcoin::{Amount, BlockHash, Txid};
-use bitcoin_block_parser::blocks::{BlockParser, DefaultParser};
+use bitcoin_block_parser::blocks::{BlockParser, DefaultParser, InOrderParser};
 use bitcoin_block_parser::headers::HeaderParser;
 use bitcoin_block_parser::utxos::{FilterParser, OutStatus, UtxoParser};
 use clap::{Parser, ValueEnum};
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
             }
         }
         Function::Unordered => for _ in DefaultParser.parse(&headers) {},
-        Function::Ordered => for _ in DefaultParser.parse_ordered(&headers) {},
+        Function::Ordered => for _ in InOrderParser.parse(&headers) {},
     }
     Ok(())
 }

@@ -133,15 +133,6 @@ pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
         Ok(self.parse(&headers))
     }
 
-    /// Parse all the blocks represented by the headers, ensuring the results `B` are returned
-    /// in the same order the [`ParsedHeader`] were passed in.
-    ///
-    /// Note that by ordering the results [`BlockParser::batch`] will run on a single thread instead
-    /// of multiple which could affect performance.
-    fn parse_ordered(&self, headers: &[ParsedHeader]) -> Receiver<Result<B>> {
-        self.parse_with_opts(headers, Self::options().order_output())
-    }
-
     /// Allows users to pass in custom [`Options`] in case they need to reduce memory usage or
     /// otherwise tune performance for their system.  Users should call [`BlockParser::options`]
     /// to get the default options associated with the parser first.
@@ -263,6 +254,24 @@ impl BlockParser<Block> for DefaultParser {
     }
 }
 
+/// Parse all the blocks represented by the headers, ensuring the blocks are returned
+/// in the same order the [`ParsedHeader`] were passed in.
+///
+/// Note that by ordering the results [`BlockParser::batch`] will run on a single thread instead
+/// of multiple which could affect performance.
+#[derive(Clone, Debug)]
+pub struct InOrderParser;
+impl BlockParser<Block> for InOrderParser {
+    fn extract(&self, block: Block) -> Vec<Block> {
+        vec![block]
+    }
+
+    fn options() -> Options {
+        // since we do no batch processing, set batch_size to 1 to reduce memory usage
+        Options::default().batch_size(1).order_output()
+    }
+}
+
 /// Options to tune the performance of the parser, generally you can stick to the defaults unless
 /// you run into memory issues.
 pub struct Options {
@@ -274,6 +283,7 @@ pub struct Options {
 }
 /// Defaults that should be close to optimal for most parsers
 ///
+/// `order_output` determines whether the results will be returned in-order
 /// `num_threads: 128` should be enough for most systems regardless of disk speed
 /// `batch_size: 10` improves batch performance without using too much memory
 /// `channel_buffer_size: 100` increasing beyond this usually just increases memory usage
