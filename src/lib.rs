@@ -5,6 +5,7 @@
 pub mod blocks;
 pub mod headers;
 pub mod utxos;
+pub mod xor;
 
 pub use blocks::BlockParser;
 pub use blocks::DefaultParser;
