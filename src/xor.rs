@@ -19,7 +19,7 @@ pub struct XorReader<R: Read> {
 }
 
 impl<R: Read> XorReader<R> {
-    /// Create the reader wrapper.
+    /// Create a reader wrapper that performs XOR on reads.
     pub fn new(reader: R, xor_mask: [u8; XOR_MASK_LEN]) -> Self {
         Self {
             inner: reader,

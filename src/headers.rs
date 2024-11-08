@@ -32,6 +32,8 @@ pub struct ParsedHeader {
     pub hash: BlockHash,
     /// Path of the BLK file
     pub path: PathBuf,
+    /// XOR mask of the BLK file
+    pub xor_mask: [u8; XOR_MASK_LEN],
 }
 
 /// Fast parser of [`ParsedHeader`] from the blocks directory
@@ -92,6 +94,7 @@ impl HeaderParser {
                     offset: offset + Header::SIZE,
                     hash: header.block_hash(),
                     path: path.clone(),
+                    xor_mask,
                 });
                 // Get the size of the next block
                 let size = u32::from_le_bytes(buffer[4..].try_into()?) as usize;
