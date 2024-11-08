@@ -93,6 +93,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
+use log::info;
 use threadpool::ThreadPool;
 use crate::HeaderParser;
 
@@ -225,8 +226,8 @@ fn increment_log(num_parsed: &Arc<AtomicUsize>, start: Instant, log_at: usize) {
 
     if num % log_at == 0 {
         let elapsed = (Instant::now() - start).as_secs();
-        print!("{}K blocks parsed,", num / 1000);
-        println!(" {}m{}s elapsed", elapsed / 60, elapsed % 60);
+        info!("{}K blocks parsed,", num / 1000);
+        info!(" {}m{}s elapsed", elapsed / 60, elapsed % 60);
     }
 }
 
