@@ -17,6 +17,7 @@ anyhow = "1.0.88"
 threadpool = "1.8.1"
 rustc-hash = "2.0.0"
 crossbeam-channel = "0.5.13"
+log = "0.4.22"
 
 # Could make the following deps into a feature
 postcard = { version = "1.0.10", features = ["use-std"] }
