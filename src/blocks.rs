@@ -1,7 +1,7 @@
 //! The [`BlockParser`] trait allows you to implement a custom parser or use one of the predefined ones.
 //!
 //! For example, imagine you want to take the biggest tx using [`Transaction::total_size`] from
-//! every block and sum their output [`Amount`].
+//! every block and sum their output [`bitcoin::Amount`].
 //!
 //! You can use the [`DefaultParser`] to simply iterate over the [`Block`]:
 //! ```no_run
@@ -29,45 +29,57 @@
 //! }
 //! ```
 //!
-//! If you wish to increase performance you may need to implement your own parser.  This example
-//! uses ~2x less memory and less time since [`BlockParser::extract`] reduces the data size and runs
+//! If you wish to increase performance you may need to use [`BlockParser::parse_map`].  This example
+//! uses ~2x less memory and less time since it reduces the data size and runs
 //! on multiple threads.  The more compute and memory your algorithm uses, the more you may benefit
 //! from this.
 //! ```no_run
 //! use bitcoin::*;
 //! use bitcoin_block_parser::*;
+//! use anyhow::Result;
+//! use crossbeam_channel::Receiver;
 //!
-//! #[derive(Clone)]
-//! struct AmountParser;
-//! impl BlockParser<Amount> for AmountParser {
-//!     fn extract(&self, block: Block) -> Vec<Amount> {
-//!         let max = block.txdata.iter().max_by_key(|tx| tx.total_size());
-//!         vec![max.unwrap().output.iter().map(|out| out.value).sum()]
+//! let headers = HeaderParser::parse("/path/to/blocks").unwrap();
+//! let receiver: Receiver<Result<Amount>> = DefaultParser.parse_map(&headers, |block| {
+//!     // Code in this closure runs in parallel
+//!     let mut amount = bitcoin::Amount::ZERO;
+//!     let max = block.txdata.into_iter().max_by_key(|tx| tx.total_size());
+//!     for output in max.unwrap().output {
+//!         amount += output.value;
 //!     }
-//! }
+//!     amount
+//! });
 //!
-//! let receiver = AmountParser.parse_dir("/path/to/blocks").unwrap();
-//! let amounts: anyhow::Result<Vec<Amount>> = receiver.iter().collect();
-//! println!("Sum of txids: {}", amounts.unwrap().into_iter().sum::<Amount>());
+//! let mut total_amount = bitcoin::Amount::ZERO;
+//! for amount in receiver {
+//!   total_amount += amount.unwrap();
+//! }
+//! println!("Sum of txids: {}", total_amount);
 //! ```
 //!
-//! You can also cache data within your [`BlockParser`] by using an [`Arc`] that will be shared
-//! across all threads.  Updating any locked stated should take place in [`BlockParser::batch`]
+//! You can implement your own [`BlockParser`] which contains shared state using an [`Arc`].
+//! Updating any locked stated should take place in [`BlockParser::batch`]
 //! to reduce the contention on the lock.
 //! ```no_run
 //! use std::sync::*;
 //! use bitcoin::*;
 //! use bitcoin_block_parser::*;
 //!
+//! // Parser with shared state, must implement Clone for parallelism
 //! #[derive(Clone, Default)]
 //! struct AmountParser(Arc<Mutex<Amount>>);
+//!
+//! // Custom implementation of a parser
 //! impl BlockParser<Amount> for AmountParser {
+//!     // Runs in parallel on each block
 //!     fn extract(&self, block: bitcoin::Block) -> Vec<Amount> {
 //!         let max = block.txdata.iter().max_by_key(|tx| tx.total_size());
 //!         vec![max.unwrap().output.iter().map(|out| out.value).sum()]
 //!     }
 //!
+//!     // Runs on batches of items from the extract function
 //!     fn batch(&self, items: Vec<Amount>) -> Vec<Amount> {
+//!         // We should access our Mutex here to reduce contention on the lock
 //!         let mut sum = self.0.lock().unwrap();
 //!         for item in items {
 //!             *sum += item;
@@ -82,20 +94,21 @@
 //! ```
 
 use crate::headers::ParsedHeader;
+use crate::HeaderParser;
 use anyhow::Result;
 use bitcoin::consensus::Decodable;
 use bitcoin::{Block, Transaction};
 use crossbeam_channel::{bounded, Receiver, Sender};
+use log::info;
 use rustc_hash::FxHashMap;
+use std::convert::identity;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-use log::info;
 use threadpool::ThreadPool;
-use crate::HeaderParser;
 
 /// Implement this trait to create a custom [`Block`] parser.
 pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
@@ -134,10 +147,30 @@ pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
         Ok(self.parse(&headers))
     }
 
+    /// Parse the blocks and then perform the `map` function.
+    /// Use when performing expensive post-processing for a large speed-up.
+    fn parse_map<C: Send + 'static>(
+        &self,
+        headers: &[ParsedHeader],
+        map: fn(B) -> C,
+    ) -> Receiver<Result<C>> {
+        self.parse_with_opts_map(headers, Self::options(), map)
+    }
+
     /// Allows users to pass in custom [`Options`] in case they need to reduce memory usage or
     /// otherwise tune performance for their system.  Users should call [`BlockParser::options`]
     /// to get the default options associated with the parser first.
     fn parse_with_opts(&self, headers: &[ParsedHeader], opts: Options) -> Receiver<Result<B>> {
+        self.parse_with_opts_map(headers, opts, identity)
+    }
+
+    /// Pass in custom [`Options`] and a `map` function.
+    fn parse_with_opts_map<C: Send + 'static>(
+        &self,
+        headers: &[ParsedHeader],
+        opts: Options,
+        map: fn(B) -> C,
+    ) -> Receiver<Result<C>> {
         // Create the batches of headers
         let mut batched: Vec<Vec<ParsedHeader>> = vec![vec![]];
         for header in headers.iter().cloned() {
@@ -174,7 +207,7 @@ pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
 
         if opts.order_output {
             // Spawn a single thread to ensure the output is in order
-            let (tx_c, rx_c) = bounded::<Result<B>>(opts.channel_buffer_size);
+            let (tx_c, rx_c) = bounded::<Result<C>>(opts.channel_buffer_size);
             let parser = self.clone();
             thread::spawn(move || {
                 let mut current_index = 0;
@@ -185,7 +218,7 @@ pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
 
                     while let Some(ordered) = unordered.remove(&current_index) {
                         current_index += 1;
-                        parser.send_batch(&tx_c, ordered);
+                        parser.send_batch(&tx_c, ordered, map);
                     }
                 }
             });
@@ -193,14 +226,14 @@ pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
         } else {
             // Spawn multiple threads in the case we don't care about the output order
             let pool_batch = ThreadPool::new(opts.num_threads);
-            let (tx_c, rx_c) = bounded::<Result<B>>(opts.channel_buffer_size);
+            let (tx_c, rx_c) = bounded::<Result<C>>(opts.channel_buffer_size);
             for _ in 0..opts.num_threads {
                 let tx_c = tx_c.clone();
                 let rx_b = rx_b.clone();
                 let parser = self.clone();
                 pool_batch.execute(move || {
                     for (_, batch) in rx_b {
-                        parser.send_batch(&tx_c, batch);
+                        parser.send_batch(&tx_c, batch, map);
                     }
                 });
             }
@@ -209,9 +242,9 @@ pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
     }
 
     /// Helper function for sending batch results in a channel
-    fn send_batch(&self, tx_c: &Sender<Result<B>>, batch: Result<Vec<B>>) {
+    fn send_batch<C>(&self, tx_c: &Sender<Result<C>>, batch: Result<Vec<B>>, map: fn(B) -> C) {
         let results = match batch.map(|b| self.batch(b)) {
-            Ok(c) => c.into_iter().map(|c| Ok(c)).collect(),
+            Ok(b) => b.into_iter().map(|b| Ok(map(b))).collect(),
             Err(e) => vec![Err(e)],
         };
         for result in results {
@@ -226,8 +259,8 @@ fn increment_log(num_parsed: &Arc<AtomicUsize>, start: Instant, log_at: usize) {
 
     if num % log_at == 0 {
         let elapsed = (Instant::now() - start).as_secs();
-        info!("{}K blocks parsed,", num / 1000);
-        info!(" {}m{}s elapsed", elapsed / 60, elapsed % 60);
+        let blocks = format!("{}K blocks parsed,", num / 1000);
+        info!("{} {}m{}s elapsed", blocks, elapsed / 60, elapsed % 60);
     }
 }
 

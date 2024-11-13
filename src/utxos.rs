@@ -19,7 +19,7 @@
 //!
 //! // Note you only need to write the filter to a file once
 //! let parser = FilterParser::new();
-//! for _ in parser.parse_dir("/path/to/blocks") {}
+//! for _ in parser.parse_dir("/path/to/blocks").unwrap() {}
 //! parser.write("filter.bin").unwrap();
 //!
 //! let parser = UtxoParser::new("filter.bin").unwrap();
@@ -54,6 +54,7 @@ use rand::rngs::SmallRng;
 use rand::{Error, RngCore, SeedableRng};
 use rustc_hash::{FxHashMap, FxHasher};
 use scalable_cuckoo_filter::{ScalableCuckooFilter, ScalableCuckooFilterBuilder};
+use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::hash::Hasher;
@@ -61,7 +62,6 @@ use std::io::{BufReader, BufWriter, Read};
 use std::iter::Zip;
 use std::slice::Iter;
 use std::sync::{Arc, Mutex};
-use serde::{Deserialize, Serialize};
 
 type OutPoints = (Vec<ShortOutPoint>, Vec<ShortOutPoint>);
 
@@ -85,7 +85,7 @@ impl FilterParser {
     /// Constructs a new filter parser
     pub fn new() -> Self {
         Self {
-            filter: Arc::new(Mutex::new(OutPointFilter::new(3_000_000))),
+            filter: Arc::new(Mutex::new(OutPointFilter::new(300_000_000))),
         }
     }
 
@@ -243,12 +243,14 @@ impl OutPointFilter {
     /// Because we are storing SHA256 hashes from [`Txid`] we use non-cryptographic [`rand::Rng`] and
     /// [`Hasher`] which are optimized for speed without bias.
     pub fn new(initial_capacity: usize) -> Self {
-        Self(ScalableCuckooFilterBuilder::default()
-                 .initial_capacity(initial_capacity)
-                 .false_positive_probability(0.000_000_000_001)
-                 .rng(FastRng::default())
-                 .hasher(FastHasher::default())
-                 .finish())
+        Self(
+            ScalableCuckooFilterBuilder::default()
+                .initial_capacity(initial_capacity)
+                .false_positive_probability(0.000_000_000_001)
+                .rng(FastRng::default())
+                .hasher(FastHasher::default())
+                .finish(),
+        )
     }
 
     /// See [`ScalableCuckooFilter::contains`]
