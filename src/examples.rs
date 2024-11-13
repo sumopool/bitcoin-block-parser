@@ -1,11 +1,13 @@
 //! Contains example programs, self-tests, and benchmarks.
 //! To run use the command `cargo run --features examples --release --`
-use crate::blocks::{BlockParser, DefaultParser, InOrderParser};
+
+use crate::blocks::{BlockParser, InOrderParser, ParallelParser};
 use crate::headers::HeaderParser;
 use crate::utxos::{FilterParser, OutStatus, UtxoParser};
 use anyhow::Result;
 use bitcoin::{Amount, BlockHash, Txid};
 use clap::{Parser, ValueEnum};
+use std::convert::identity;
 use std::str::FromStr;
 
 /// Example program that can perform self-tests and benchmarks
@@ -33,15 +35,17 @@ enum Function {
     Filter,
     /// [`UtxoParser`] benchmark parsing the UTXOs
     Utxo,
-    /// [`DefaultParser::parse`] benchmark for all blocks unordered
+    /// [`ParallelParser::parse`] benchmark for all blocks unordered
     Unordered,
-    /// [`DefaultParser::parse_ordered`] benchmark for all blocks ordered
+    /// [`ParallelParser::parse_ordered`] benchmark for all blocks ordered
     Ordered,
 }
 
 /// Runner for the examples
 pub fn run() -> Result<()> {
-    env_logger::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let args = Args::parse();
     let mut headers = HeaderParser::parse(&args.input)?;
     headers.truncate(850_000);
@@ -50,21 +54,15 @@ pub fn run() -> Result<()> {
         Function::Test => test(args)?,
         Function::Filter => {
             let parser = FilterParser::new();
-            for _ in parser.parse(&headers) {}
+            for _ in parser.parse(&headers, identity) {}
             parser.write(&args.filter_file)?;
         }
         Function::Utxo => {
             let parser = UtxoParser::new(&args.filter_file)?;
-            for block in parser.parse(&headers) {
-                let block = block?;
-                for (tx, txid) in block.transactions() {
-                    assert_eq!(tx.output.len(), block.output_status(txid).len());
-                    assert_eq!(tx.input.len(), block.input_amount(txid).len());
-                }
-            }
+            for _ in parser.parse(&headers, |_| {}) {}
         }
-        Function::Unordered => for _ in DefaultParser.parse(&headers) {},
-        Function::Ordered => for _ in InOrderParser.parse(&headers) {},
+        Function::Unordered => for _ in ParallelParser.parse(&headers, |_| {}) {},
+        Function::Ordered => for _ in InOrderParser.parse(&headers, |_| {}) {},
     }
     Ok(())
 }
@@ -78,7 +76,7 @@ fn test(args: Args) -> Result<()> {
 
     let parser = FilterParser::new();
     println!("\nTesting write_filter");
-    for _ in parser.parse(&headers) {}
+    for _ in parser.parse(&headers, identity) {}
     parser.write(&args.filter_file)?;
 
     println!("\nTesting UtxoParser");
@@ -90,7 +88,7 @@ fn test(args: Args) -> Result<()> {
         Txid::from_str("cf2cc1897eb061e2406e644ecee3c26ee64cfadcc626890438c3d058511c9094")?;
 
     let parser = UtxoParser::new(&args.filter_file)?;
-    for block in parser.parse(&headers) {
+    for block in parser.parse(&headers, identity) {
         let block = block?;
         for (_, txid) in block.transactions() {
             // Verify spent UTXO #2 tx here https://mempool.space/tx/062ed26778b8d0794c269029ee7b1d56b4ecaa379048b21298bf6d35876d00c4

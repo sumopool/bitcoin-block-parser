@@ -14,35 +14,48 @@
 //! Example usage:
 //!
 //! ```no_run
+//! use bitcoin::Amount;
 //! use bitcoin_block_parser::*;
 //! use bitcoin_block_parser::utxos::*;
 //!
 //! // Note you only need to write the filter to a file once
 //! let parser = FilterParser::new();
-//! for _ in parser.parse_dir("/path/to/blocks").unwrap() {}
+//! parser.read("/path/to/blocks").unwrap();
 //! parser.write("filter.bin").unwrap();
 //!
+//! // Map each block to the total unspent UTXOs and input amounts
 //! let parser = UtxoParser::new("filter.bin").unwrap();
-//! // for every block
-//! for block in parser.parse_dir("/path/to/blocks").unwrap() {
-//!   let block = block.unwrap();
+//! let results = parser.parse_dir("/path/to/blocks", |block| {
 //!   // for every transaction
+//!   let mut unspent_amounts = Amount::ZERO;
+//!   let mut input_amounts = Amount::ZERO;
+//!
 //!   for (tx, txid) in block.transactions() {
 //!     let outs = block.output_status(txid).iter().zip(tx.output.iter());
 //!     let inputs = block.input_amount(txid).iter().zip(tx.input.iter());
+//!
 //!     // for every output in the transaction
 //!     for (status, output) in outs {
 //!       if *status == OutStatus::Unspent {
-//!         let script = &output.script_pubkey;
-//!         println!("{:?} has {} unspent funds", script, output.value);
+//!         unspent_amounts += output.value;
 //!       }
 //!     }
+//!
 //!     // for every input in the transaction
 //!     for (amount, input) in inputs {
-//!       let outpoint = &input.previous_output;
-//!       println!("{:?} has {} input funds", outpoint, amount);
+//!       input_amounts += *amount;
 //!     }
 //!   }
+//!   (unspent_amounts, input_amounts)
+//! }).unwrap();
+//!
+//! // Now sum up all the results
+//! let mut unspent_total = Amount::ZERO;
+//! let mut input_total = Amount::ZERO;
+//! for result in results {
+//!   let (unspent, input) = result.unwrap();
+//!   unspent_total += unspent;
+//!   input_total += input;
 //! }
 //! ```
 
@@ -88,6 +101,12 @@ impl FilterParser {
         Self {
             filter: Arc::new(Mutex::new(OutPointFilter::new(300_000_000))),
         }
+    }
+
+    /// Reads the blocks directory to build the filter
+    pub fn read(&self, input: &str) -> Result<()> {
+        for _ in self.parse_dir(input, |_| {})? {}
+        Ok(())
     }
 
     /// Writes the filter to disk for use in another parser (see [`UtxoParser::new`])
