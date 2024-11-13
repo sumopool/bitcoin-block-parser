@@ -94,6 +94,7 @@
 //! ```
 
 use crate::headers::ParsedHeader;
+use crate::xor::XorReader;
 use crate::HeaderParser;
 use anyhow::Result;
 use bitcoin::consensus::Decodable;
@@ -266,7 +267,8 @@ fn increment_log(num_parsed: &Arc<AtomicUsize>, start: Instant, log_at: usize) {
 
 /// Parses a block from a `ParsedHeader` into a `bitcoin::Block`
 fn parse_block(header: ParsedHeader) -> Result<Block> {
-    let mut reader = BufReader::new(File::open(&header.path)?);
+    let reader = XorReader::new(File::open(&header.path)?, header.xor_mask);
+    let mut reader = BufReader::new(reader);
     reader.seek_relative(header.offset as i64)?;
     Ok(Block {
         header: header.inner,
