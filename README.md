@@ -39,13 +39,13 @@ Our benchmarks were run on NVMe storage with a 32-thread processor on **850,000*
 ## Quick Usage
 - To parse blocks pass in the `blocks` directory of your bitcoin node and call [`DefaultParser::parse_dir`](blocks::DefaultParser::parse_dir)
 - If your algorithm requires the blocks to be processed in-order use [`InOrderParser::parse_dir`](blocks::InOrderParser::parse_dir)
-- For advanced usage on using block parsers see the [`blocks`](crate::blocks) module docs
+- For advanced usage and implementing your own block parser see the [`blocks`](crate::blocks) module docs
 - To track amounts through the transaction graph see the [`utxos`](crate::utxos) module docs
 
 ```rust
 use bitcoin_block_parser::*;
 
-// Initialize logger (if you want to monitor parsing progress)
+// Initialize a logger (if you want to monitor parsing progress)
 env_logger::builder().filter_level(log::LevelFilter::Info).init();
 
 // Iterates over all the blocks in the directory in parallel

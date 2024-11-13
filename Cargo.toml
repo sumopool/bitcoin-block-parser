@@ -1,6 +1,6 @@
 [package]
 name = "bitcoin-block-parser"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 authors = ["Saigo Nanshu"]
 license = "MIT"
@@ -11,6 +11,11 @@ categories = ["cryptography::cryptocurrencies"]
 keywords = [ "crypto", "bitcoin" ]
 documentation = "https://docs.rs/bitcoin-block-parser"
 
+[features]
+default = ["utxo"]
+utxo = ["rand", "clap", "scalable_cuckoo_filter", "postcard", "serde"]
+examples = ["utxo", "env_logger"]
+
 [dependencies]
 bitcoin = "0.32.2"
 anyhow = "1.0.88"
@@ -19,10 +24,10 @@ rustc-hash = "2.0.0"
 crossbeam-channel = "0.5.13"
 log = "0.4.22"
 
-# Could make the following deps into a feature
-postcard = { version = "1.0.10", features = ["use-std"] }
-scalable_cuckoo_filter = { version = "0.3.2", features = ["serde_support"] }
-clap = { version = "4.5.16", features = ["derive"] }
-rand = {  version = "0.8.5", features = ["small_rng"] }
-serde = { version = "1.0.210", features = ["derive"] }
-env_logger = "0.11.5"
+# Optional dependencies you can remove by setting "default-features = false"
+postcard = { version = "1.0.10", features = ["use-std"], optional = true }
+scalable_cuckoo_filter = { version = "0.3.2", features = ["serde_support"], optional = true }
+clap = { version = "4.5.16", features = ["derive"], optional = true }
+rand = {  version = "0.8.5", features = ["small_rng"], optional = true }
+serde = { version = "1.0.210", features = ["derive"], optional = true }
+env_logger = { version = "0.11.5", optional = true }

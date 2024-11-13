@@ -65,7 +65,8 @@ use std::sync::{Arc, Mutex};
 
 type OutPoints = (Vec<ShortOutPoint>, Vec<ShortOutPoint>);
 
-/// A parser that writes a probabilistic filter of unspent [`ShortOutPoint`]
+/// A parser that writes a probabilistic filter of unspent [`ShortOutPoint`].
+/// See the [module docs](crate::utxos) for example usage.
 ///
 /// We use a [`ScalableCuckooFilter`] which is compact like a bloom filter, but allows us
 /// to remove elements and grow/shrink the filter as needed.

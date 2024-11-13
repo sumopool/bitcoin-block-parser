@@ -3,7 +3,10 @@
 #![allow(rustdoc::redundant_explicit_links)]
 
 pub mod blocks;
+#[cfg(feature = "examples")]
+pub mod examples;
 pub mod headers;
+#[cfg(feature = "utxo")]
 pub mod utxos;
 pub mod xor;
 
