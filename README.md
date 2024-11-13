@@ -29,12 +29,12 @@ Fast optimized parser for the bitcoin `blocks` data with UTXO tracking.
 
 Our benchmarks were run on NVMe storage with a 32-thread processor on **850,000** blocks:
 
-| Function      | Time   | Memory  |
-|---------------|--------|---------|
-| DefaultParser | 5 min  | 3.5 GB  | 
-| InOrderParser | 6 min  | 3.4 GB  | 
-| FilterParser  | 17 min | 9.3 GB  |
-| UtxoParser    | 39 min | 17.5 GB |
+| Function       | Time    | Memory  |
+|----------------|---------|---------|
+| ParallelParser | 3m 29s  | 2.1 GB  | 
+| InOrderParser  | 5m 42s  | 2.9 GB  | 
+| FilterParser   | 16m 58s | 9.4 GB  |
+| UtxoParser     | 42m 12s | 17.2 GB |
 
 ## Quick Usage
 - To parse blocks pass in the `blocks` directory of your bitcoin node and call [`DefaultParser::parse_dir`](blocks::DefaultParser::parse_dir)
@@ -48,10 +48,13 @@ use bitcoin_block_parser::*;
 // Initialize a logger (if you want to monitor parsing progress)
 env_logger::builder().filter_level(log::LevelFilter::Info).init();
 
-// Iterates over all the blocks in the directory in parallel
-// Use InOrderParser if your algorithm requires the blocks to be processed in-order
-for block in DefaultParser.parse_dir("/home/user/.bitcoin/blocks").unwrap() {
-  // Do whatever you want with the parsed block here
-  block.unwrap().check_witness_commitment();
+// Parse all blocks in the directory and map them to a value
+let results = ParallelParser.parse_dir("/home/user/.bitcoin/blocks", |block| {
+    block.total_size()
+}).unwrap();
+
+// Iterate over the results to do whatever you want
+for result in results {
+    println!("Block size {}", result.unwrap());
 }
 ```

@@ -11,6 +11,6 @@ pub mod utxos;
 pub mod xor;
 
 pub use blocks::BlockParser;
-pub use blocks::DefaultParser;
 pub use blocks::InOrderParser;
+pub use blocks::ParallelParser;
 pub use headers::HeaderParser;
