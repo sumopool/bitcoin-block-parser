@@ -38,6 +38,7 @@ enum Function {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
     let args = Args::parse();
     let mut headers = HeaderParser::parse(&args.input)?;
     headers.truncate(850_000);

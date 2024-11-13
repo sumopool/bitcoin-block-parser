@@ -9,4 +9,5 @@ pub mod xor;
 
 pub use blocks::BlockParser;
 pub use blocks::DefaultParser;
+pub use blocks::InOrderParser;
 pub use headers::HeaderParser;

@@ -18,13 +18,14 @@
 //! println!("Sum of txids: {}", amount);
 //! ```
 //!
-//! If you only want to run on a subset of blocks use [`HeaderParser`]:
+//! If you only want to run on a subset of blocks use [`HeaderParser`].  If you need to process
+//! blocks in-order use [`InOrderParser`].
 //! ```no_run
 //! use bitcoin_block_parser::*;
 //!
 //! let headers = HeaderParser::parse("/path/to/blocks").unwrap();
 //! // Skip the first 200,000 blocks
-//! for block in DefaultParser.parse(&headers[200_000..]) {
+//! for block in InOrderParser.parse(&headers[200_000..]) {
 //!   // Do whatever you need with the blocks
 //! }
 //! ```
@@ -32,7 +33,7 @@
 //! If you wish to increase performance you may need to use [`BlockParser::parse_map`].  This example
 //! uses ~2x less memory and less time since it reduces the data size and runs
 //! on multiple threads.  The more compute and memory your algorithm uses, the more you may benefit
-//! from this.
+//! from this.  The mapping will occur after [`BlockParser::batch`], keeping the ordering.
 //! ```no_run
 //! use bitcoin::*;
 //! use bitcoin_block_parser::*;
@@ -150,6 +151,7 @@ pub trait BlockParser<B: Send + 'static>: Clone + Send + 'static {
 
     /// Parse the blocks and then perform the `map` function.
     /// Use when performing expensive post-processing for a large speed-up.
+    /// The mapping will occur after [`BlockParser::batch`], keeping the ordering.
     fn parse_map<C: Send + 'static>(
         &self,
         headers: &[ParsedHeader],
