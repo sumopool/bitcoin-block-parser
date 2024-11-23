@@ -21,7 +21,7 @@ use threadpool::ThreadPool;
 /// Multithreaded parser for [`bitcoin::Block`].
 ///
 /// # Examples
-/// Call `parse()` to run a `Fn(Block) -> T` that returns an [`Iterator<T>`].  The `Fn` closure
+/// Call `parse()` to run a `Fn(Block) -> T` that returns a [`ParserIterator<T>`].  The `Fn` closure
 /// runs on multiple threads.
 /// ```no_run
 /// use bitcoin_block_parser::blocks::*;

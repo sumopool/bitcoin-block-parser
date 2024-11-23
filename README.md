@@ -26,12 +26,12 @@ Fast optimized parser for bitcoin `blocks` with input and output tracking.
 - We recommend using fast storage (e.g. NVMe) and a multithreaded CPU for best performance
 - See benchmarks below to understand how much RAM you may need:
 
-| Function                          | Purpose                              | Time    | Memory  |
-|-----------------------------------|--------------------------------------|---------|---------|
-| BlockParser::parse()              | Parses blocks                        | 2m 55s  | 0.9 GB  | 
-| UtxoParser::parse()               | Tracks input amounts (no filter)     | 7m 41s  | 25.0 GB | 
-| UtxoParser::create_filter()       | Creates new filter                   | 16m 09s | 5.6 GB  |
-| UtxoParser::load_filter().parse() | Tracks input & outputs (with filter) | 7m 46s  | 11.8 GB |
+| Function                                                                   | Time    | Memory  |
+|----------------------------------------------------------------------------|---------|---------|
+| `BlockParser::parse()`<br/>Parses blocks                                     | 2m 55s  | 0.9 GB  | 
+| `UtxoParser::parse()`<br/>Tracks input amounts (no filter)                   | 7m 41s  | 25.0 GB | 
+| `UtxoParser::create_filter()`<br/>Creates new filter                         | 16m 09s | 5.6 GB  |
+| `UtxoParser::load_filter().parse()`<br/>Tracks input & outputs (with filter) | 7m 46s  | 11.8 GB |
 
 Our benchmarks were run on NVMe storage with a 32-thread processor on **800,000** blocks.
 
