@@ -1,7 +1,5 @@
-//! Use [`HeaderParser`] to read from your node's `blocks` directory.
-//!
-//! You will get back Vec<[`ParsedHeader`]> that identifies every block.  You can take a slice or
-//! even reorder these headers before you pass them into [`crate::BlockParser::parse`].
+//! Used to parse the [`bitcoin::block::Header`] from the `blocks` directory to order and locate
+//! every block for later parsing.
 
 use crate::xor::{XorReader, XOR_MASK_LEN};
 use anyhow::bail;
@@ -10,7 +8,8 @@ use bitcoin::block::Header;
 use bitcoin::consensus::Decodable;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
-use rustc_hash::FxHashMap;
+use log::info;
+use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -33,18 +32,23 @@ pub struct ParsedHeader {
     /// Path of the BLK file
     pub path: PathBuf,
     /// XOR mask of the BLK file
-    pub xor_mask: [u8; XOR_MASK_LEN],
+    pub xor_mask: Option<[u8; XOR_MASK_LEN]>,
 }
+/// You can [specify the blocks directory](https://en.bitcoin.it/wiki/Data_directory) when
+/// running `bitcoind`.
 
-/// Fast parser of [`ParsedHeader`] from the blocks directory
+/// Fast multithreaded parser of [`ParsedHeader`] from the blocks directory
 pub struct HeaderParser;
 impl HeaderParser {
-    /// Parses the headers from the `blocks_dir` returning the `ParsedHeader` in height order,
-    /// starting from the genesis block.  Takes a few seconds to run.
+    /// Parses the headers from the bitcoin `blocks` directory returning [`ParsedHeader`] in height order,
+    /// starting from the genesis block.
+    /// - Returns an `Err` if the directory contains invalid `.blk` files.
+    /// - Takes a few seconds to run.
     pub fn parse(blocks_dir: &str) -> Result<Vec<ParsedHeader>> {
+        info!("Reading headers from {}", blocks_dir);
         let xor_mask = Self::read_xor_mask(blocks_dir)?;
         let (tx, rx) = mpsc::channel();
-        let pool = ThreadPool::new(100);
+        let pool = ThreadPool::new(64);
 
         // Read headers from every BLK file in a new thread
         for path in Self::blk_files(blocks_dir)? {
@@ -58,7 +62,7 @@ impl HeaderParser {
         drop(tx);
 
         // Receive all the headers from spawned threads
-        let mut locations = FxHashMap::default();
+        let mut locations = HashMap::default();
         let mut collisions: Vec<ParsedHeader> = vec![];
         for received in rx {
             for header in received? {
@@ -67,6 +71,7 @@ impl HeaderParser {
                 }
             }
         }
+        info!("Finished reading headers");
 
         // Resolve reorgs and order the headers by block height
         for collision in collisions {
@@ -78,8 +83,8 @@ impl HeaderParser {
     /// Parses headers from a BLK file
     fn parse_headers_file(
         path: PathBuf,
-        xor_mask: [u8; XOR_MASK_LEN],
-    ) -> anyhow::Result<Vec<ParsedHeader>> {
+        xor_mask: Option<[u8; XOR_MASK_LEN]>,
+    ) -> Result<Vec<ParsedHeader>> {
         let buffer_size = PRE_HEADER_SIZE + Header::SIZE;
         let reader = XorReader::new(File::open(&path)?, xor_mask);
         let mut reader = BufReader::with_capacity(buffer_size, reader);
@@ -110,16 +115,13 @@ impl HeaderParser {
     }
 
     /// Returns the list of all BLK files in the dir
-    fn blk_files(dir: &str) -> anyhow::Result<Vec<PathBuf>> {
+    fn blk_files(dir: &str) -> Result<Vec<PathBuf>> {
         let read_dir = fs::read_dir(Path::new(&dir))?;
         let mut files = vec![];
 
         for file in read_dir {
             let file = file?;
-            let name = file
-                .file_name()
-                .into_string()
-                .expect("Could not parse filename");
+            let name = file.file_name().to_string_lossy().to_string();
             if name.starts_with("blk") {
                 files.push(file.path())
             }
@@ -134,25 +136,22 @@ impl HeaderParser {
 
     /// Reads the block XOR mask. If no `xor.dat` file is present,
     /// use all-zeroed array to perform an XOR no-op.
-    fn read_xor_mask<P: AsRef<Path>>(dir: P) -> anyhow::Result<[u8; XOR_MASK_LEN]> {
+    fn read_xor_mask<P: AsRef<Path>>(dir: P) -> Result<Option<[u8; XOR_MASK_LEN]>> {
         let path = dir.as_ref().join("xor.dat");
         if !path.exists() {
-            return Ok(Default::default());
+            return Ok(None);
         }
         let mut file = File::open(path)?;
         let mut buf = [0_u8; XOR_MASK_LEN];
         file.read_exact(&mut buf)?;
-        Ok(buf)
+        Ok(Some(buf))
     }
 
     /// In case of reorgs we need to resolve to the longest chain
-    fn resolve_collisions(
-        headers: &mut FxHashMap<BlockHash, ParsedHeader>,
-        collision: ParsedHeader,
-    ) {
+    fn resolve_collisions(headers: &mut HashMap<BlockHash, ParsedHeader>, collision: ParsedHeader) {
         let existing = headers
             .get(&collision.inner.prev_blockhash)
-            .expect("exists");
+            .expect("Missing previous blockhash (corrupted blocks)");
         let mut e_hash = &existing.hash;
         let mut c_hash = &collision.hash;
 
@@ -168,7 +167,7 @@ impl HeaderParser {
     }
 
     /// Puts the headers into the correct order by block height (using the hashes)
-    fn order_headers(mut headers: FxHashMap<BlockHash, ParsedHeader>) -> Vec<ParsedHeader> {
+    fn order_headers(mut headers: HashMap<BlockHash, ParsedHeader>) -> Vec<ParsedHeader> {
         let mut ordered_headers = vec![];
         // Genesis block starts with prev = all_zeros
         let mut next_hash = BlockHash::all_zeros();

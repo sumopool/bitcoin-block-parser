@@ -1,371 +1,387 @@
-//! The [`FilterParser`] and [`UtxoParser`] parser must be used together in order to track UTXOs
-//! as they move through the tx graph, giving you a map between:
-//! * [`bitcoin::TxIn`] -> [`Amount`]
-//! * [`bitcoin::TxOut`] -> [`OutStatus::Spent`] or [`OutStatus::Unspent`]
-//!
-//! This allows you to easily compute values such as mining fees and find all unspent txs.
-//! The [`FilterParser`] creates a [`ScalableCuckooFilter`] which allows us to track all
-//! unspent UTXOs with low memory-overhead similar to a bloom filter.
-//!
-//! The filter is written to a file which is loaded into memory by [`UtxoParser`], allowing us to
-//! track the flow of all transaction amounts from inputs with a far lower memory overhead and no
-//! performance hit of using an on-disk lookup table.
-//!
-//! Example usage:
-//!
-//! ```no_run
-//! use bitcoin::Amount;
-//! use bitcoin_block_parser::*;
-//! use bitcoin_block_parser::utxos::*;
-//!
-//! // Note you only need to write the filter to a file once
-//! let parser = FilterParser::new();
-//! parser.read("/path/to/blocks").unwrap();
-//! parser.write("filter.bin").unwrap();
-//!
-//! // Map each block to the total unspent UTXOs and input amounts
-//! let parser = UtxoParser::new("filter.bin").unwrap();
-//! let results = parser.parse_dir("/path/to/blocks", |block| {
-//!   // for every transaction
-//!   let mut unspent_amounts = Amount::ZERO;
-//!   let mut input_amounts = Amount::ZERO;
-//!
-//!   for (tx, txid) in block.transactions() {
-//!     let outs = block.output_status(txid).iter().zip(tx.output.iter());
-//!     let inputs = block.input_amount(txid).iter().zip(tx.input.iter());
-//!
-//!     // for every output in the transaction
-//!     for (status, output) in outs {
-//!       if *status == OutStatus::Unspent {
-//!         unspent_amounts += output.value;
-//!       }
-//!     }
-//!
-//!     // for every input in the transaction
-//!     for (amount, input) in inputs {
-//!       input_amounts += *amount;
-//!     }
-//!   }
-//!   (unspent_amounts, input_amounts)
-//! }).unwrap();
-//!
-//! // Now sum up all the results
-//! let mut unspent_total = Amount::ZERO;
-//! let mut input_total = Amount::ZERO;
-//! for result in results {
-//!   let (unspent, input) = result.unwrap();
-//!   unspent_total += unspent;
-//!   input_total += input;
-//! }
-//! ```
+//! Contains [`UtxoParser`] for tracking input amounts and output statuses in [`UtxoBlock`].
 
-use crate::blocks::{BlockParser, Options};
-use anyhow::Result;
+use crate::blocks::{BlockParser, ParserIterator, ParserOptions, Pipeline};
+use anyhow::{bail, Result};
+use bitcoin::block::Header;
 use bitcoin::hashes::Hash;
-use bitcoin::{Amount, Block, OutPoint, Transaction, Txid};
-use rand::rngs::SmallRng;
+use bitcoin::{Amount, Block, OutPoint, Transaction, TxIn, TxOut, Txid};
+use dashmap::DashMap;
+use log::info;
+use rand::prelude::SmallRng;
 use rand::{Error, RngCore, SeedableRng};
-use rustc_hash::{FxHashMap, FxHasher};
-use scalable_cuckoo_filter::{ScalableCuckooFilter, ScalableCuckooFilterBuilder};
-use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Formatter};
+use scalable_cuckoo_filter::{DefaultHasher, ScalableCuckooFilter, ScalableCuckooFilterBuilder};
+use std::fs;
 use std::fs::File;
-use std::hash::Hasher;
-use std::io::{BufReader, BufWriter, Read};
+use std::io::{BufReader, BufWriter};
 use std::iter::Zip;
 use std::slice::Iter;
 use std::sync::{Arc, Mutex};
 
-type OutPoints = (Vec<ShortOutPoint>, Vec<ShortOutPoint>);
-
-/// A parser that writes a probabilistic filter of unspent [`ShortOutPoint`].
-/// See the [module docs](crate::utxos) for example usage.
-///
-/// We use a [`ScalableCuckooFilter`] which is compact like a bloom filter, but allows us
-/// to remove elements and grow/shrink the filter as needed.
-/// We use this filter in [`UtxoParser`] to avoid caching UTXOs when tracking input amounts and
-/// labeling outputs as [`OutStatus::Spent`] or [`OutStatus::Unspent`]
-#[derive(Clone)]
-pub struct FilterParser {
-    filter: Arc<Mutex<OutPointFilter>>,
-}
-impl Default for FilterParser {
-    fn default() -> Self {
-        Self::new()
-    }
+/// A block that has been parsed tracking input amounts and output status
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct UtxoBlock {
+    /// The block header
+    pub header: Header,
+    /// List of transactions contained in the block
+    pub txdata: Vec<UtxoTransaction>,
 }
 
-impl FilterParser {
-    /// Constructs a new filter parser
-    pub fn new() -> Self {
+impl UtxoBlock {
+    /// Construct from a bitcoin [`Block`].
+    fn new(block: Block) -> Self {
         Self {
-            filter: Arc::new(Mutex::new(OutPointFilter::new(300_000_000))),
+            header: block.header,
+            txdata: block.txdata.into_iter().map(UtxoTransaction::new).collect(),
         }
     }
 
-    /// Reads the blocks directory to build the filter
-    pub fn read(&self, input: &str) -> Result<()> {
-        for _ in self.parse_dir(input, |_| {})? {}
-        Ok(())
-    }
-
-    /// Writes the filter to disk for use in another parser (see [`UtxoParser::new`])
-    /// You must call the [`FilterParser::parse`] function first.
-    pub fn write(self, output: &str) -> Result<()> {
-        let writer = BufWriter::new(File::create(output)?);
-        let filter = Arc::try_unwrap(self.filter).unwrap();
-        let mut filter = filter.into_inner().unwrap();
-        filter.shrink_to_fit();
-        postcard::to_io(&filter, writer)?;
-        Ok(())
+    /// Convert back into a [`bitcoin::Block`].
+    pub fn to_block(self) -> Block {
+        Block {
+            header: self.header,
+            txdata: self.txdata.into_iter().map(|tx| tx.transaction).collect(),
+        }
     }
 }
-impl BlockParser<OutPoints> for FilterParser {
-    // By extracting the [`ShortOutPoint`] here we optimize the memory and computation
-    // required.
-    fn extract(&self, block: Block) -> Vec<OutPoints> {
+
+/// A transaction that has been parsed tracking input amounts and output status
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct UtxoTransaction {
+    /// Underlying bitcoin transaction [`Transaction`]
+    pub transaction: Transaction,
+    /// Precomputed [`Txid`]
+    pub txid: Txid,
+    /// Tracks the input amounts in-order of inputs
+    inputs: Vec<Amount>,
+    /// Tracks the output statuses in-order of outputs
+    outputs: Vec<OutputStatus>,
+}
+
+impl UtxoTransaction {
+    /// Construct from a bitcoin [`Transaction`].
+    fn new(transaction: Transaction) -> UtxoTransaction {
+        Self {
+            txid: transaction.compute_txid(),
+            transaction,
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+
+    /// Returns the [`TxIn`] of the transaction zipped with the input amounts.
+    pub fn input(&self) -> Zip<Iter<'_, TxIn>, Iter<'_, Amount>> {
+        self.transaction.input.iter().zip(self.inputs.iter())
+    }
+
+    /// Returns the [`TxOut`] of the transaction zipped with the output [`OutputStatus`].
+    pub fn output(&self) -> Zip<Iter<'_, TxOut>, Iter<'_, OutputStatus>> {
+        self.transaction.output.iter().zip(self.outputs.iter())
+    }
+}
+
+/// Status of the [`TxOut`] within the transaction graph.
+#[derive(Clone, Debug, Eq, PartialEq, Copy)]
+pub enum OutputStatus {
+    /// The output was spent in a later block.
+    Spent,
+    /// The output was never spent in any later block (it is a UTXO).
+    Unspent,
+    /// The status of the output is unknown (only if [`UtxoParser::load_filter`] was not called).
+    Unknown,
+}
+
+type ShortOutPoints = (Vec<ShortOutPoint>, Vec<ShortOutPoint>);
+type ShortOutPointFilter = ScalableCuckooFilter<ShortOutPoint, DefaultHasher, FastRng>;
+
+/// Multithreaded parser that returns a [`ParserIterator`] of [`UtxoBlock`].
+/// * Tracks the [`Amount`] for every [`TxIn`].
+/// * Tracks the [`OutputStatus`] for every [`TxOut`] if [`UtxoParser::load_filter`] is called.
+///
+/// # Examples
+/// Computing the largest mining fee requires knowing the input amounts of every transaction.
+/// Call [`UtxoParser::parse`] to get a [`UtxoBlock`] that tracks input amounts.
+/// ```no_run
+/// use std::cmp::max;
+/// use bitcoin::Amount;
+/// use bitcoin_block_parser::utxos::*;
+///
+/// let parser = UtxoParser::new("/home/user/.bitcoin/blocks/").unwrap();
+/// let fees = parser.parse().map_parallel(|block| {
+///     let mut max_mining_fee = Amount::ZERO;
+///     for tx in block.txdata.into_iter() {
+///         // For every transaction sum up the input and output amounts
+///         let inputs: Amount = tx.input().map(|(_, amount)| *amount).sum();
+///         let outputs: Amount = tx.output().map(|(out, _)| out.value).sum();
+///         if !tx.transaction.is_coinbase() {
+///             // Subtract outputs amount from inputs amount to get the fee
+///             max_mining_fee = max(inputs - outputs, max_mining_fee);
+///         }
+///     }
+///     max_mining_fee
+/// });
+/// println!("Maximum mining fee: {}", fees.max().unwrap());
+/// ```
+///
+/// Computing the largest UTXO requires knowing the [`OutputStatus`] to determine whether a
+/// [`TxOut`] was spent or unspent.  Call [`UtxoParser::load_or_create_filter`] to track the output
+/// status.
+///
+/// Although this takes longer to run the first time it also lowers the memory usage.
+/// ```no_run
+/// use std::cmp::max;
+/// use bitcoin::Amount;
+/// use bitcoin_block_parser::utxos::*;
+///
+/// let parser = UtxoParser::new("/home/user/.bitcoin/blocks/").unwrap();
+/// let blocks = parser.load_or_create_filter("filter.bin").unwrap().parse();
+/// let amounts = blocks.map_parallel(|block| {
+///     let mut max_unspent_tx = Amount::ZERO;
+///     for tx in block.txdata.into_iter() {
+///         for (output, status) in tx.output() {
+///             if status == &OutputStatus::Unspent {
+///                 max_unspent_tx = max(output.value, max_unspent_tx);
+///             }
+///         }
+///     }
+///     max_unspent_tx
+/// });
+/// println!("Maximum unspent output: {}", amounts.max().unwrap());
+/// ```
+pub struct UtxoParser {
+    /// Filter that contains all unspent transaction outpoints.
+    filter: Option<ShortOutPointFilter>,
+    /// Underlying parser for parsing the blocks.
+    parser: BlockParser,
+    /// Used to allocate the initial capacity of shared state.
+    estimated_utxos: usize,
+}
+
+impl UtxoParser {
+    /// Creates a new parser given the `blocks` directory where the `*.blk` files are located.
+    ///
+    /// - Returns an `Err` if unable to parse the `blk` files.
+    /// - You can [specify the blocks directory](https://en.bitcoin.it/wiki/Data_directory) when
+    ///   running `bitcoind`.
+    pub fn new(blocks_dir: &str) -> Result<Self> {
+        Self::new_with_opts(blocks_dir, ParserOptions::default())
+    }
+
+    /// Creates a parser with custom [`ParserOptions`].
+    pub fn new_with_opts(blocks_dir: &str, options: ParserOptions) -> Result<Self> {
+        Ok(Self {
+            filter: None,
+            parser: BlockParser::new_with_opts(blocks_dir, options)?,
+            estimated_utxos: 300_000_000,
+        })
+    }
+
+    /// Set the estimated amount of UTXOs in the range of blocks you are parsing.
+    ///
+    /// Used to lower the memory usage of shared state objects.
+    pub fn estimated_utxos(mut self, estimated_utxos: usize) -> Self {
+        self.estimated_utxos = estimated_utxos;
+        self
+    }
+
+    /// Parse the blocks into an iterator of [`UtxoBlock`].
+    pub fn parse(self) -> ParserIterator<UtxoBlock> {
+        // if using a filter we can save memory by reducing the initial hashmap capacity
+        let hashmap_capacity = if self.filter.is_some() {
+            self.estimated_utxos / 10
+        } else {
+            self.estimated_utxos
+        };
+        let pipeline = UtxoPipeline::new(self.filter, hashmap_capacity);
+        self.parser
+            .parse(UtxoBlock::new)
+            .ordered()
+            .pipeline(&pipeline)
+    }
+
+    /// Set the height of the last block to parse.
+    ///
+    /// Parsing always starts at the genesis block in order to track the transaction graph properly.
+    pub fn block_range_end(mut self, end: usize) -> Self {
+        self.parser = self.parser.block_range(0, end);
+        self
+    }
+
+    /// Loads a `filter_file` or creates a new one if it doesn't exist.
+    pub fn load_or_create_filter(self, filter_file: &str) -> Result<Self> {
+        if !fs::exists(filter_file)? {
+            self.create_filter(filter_file)?.load_filter(filter_file)
+        } else {
+            self.load_filter(filter_file)
+        }
+    }
+
+    /// Loads a `filter_file` or returns `Err` if it doesn't exist.
+    pub fn load_filter(mut self, filter_file: &str) -> Result<Self> {
+        if !fs::exists(filter_file)? {
+            bail!("Filter file '{}' doesn't exist", filter_file);
+        }
+        let reader = BufReader::new(File::open(filter_file)?);
+        let filter = bincode::deserialize_from(reader)?;
+
+        self.filter = Some(filter);
+        Ok(self)
+    }
+
+    /// Creates a new `filter_file`.
+    pub fn create_filter(self, filter_file: &str) -> Result<Self> {
+        info!("Creating '{}'", filter_file);
+        let filter = UtxoFilter::new(self.estimated_utxos);
+        self.parser
+            .parse(UtxoFilter::outpoints)
+            .ordered()
+            .map(&|outpoints| filter.update(outpoints))
+            .for_each(|_| {});
+
+        let filter = Arc::try_unwrap(filter.filter).expect("Arc still referenced");
+        let mut filter = Mutex::into_inner(filter)?;
+        filter.shrink_to_fit();
+        let writer = BufWriter::new(File::create(filter_file)?);
+        bincode::serialize_into(writer, &filter)?;
+        Ok(self)
+    }
+}
+
+/// Contains the filter data that tracks all unspent outputs in a memory-efficient manner.
+#[derive(Clone)]
+struct UtxoFilter {
+    filter: Arc<Mutex<ShortOutPointFilter>>,
+}
+
+impl UtxoFilter {
+    /// Construct with an initial `filter_capacity`.
+    fn new(filter_capacity: usize) -> UtxoFilter {
+        Self {
+            filter: Arc::new(Mutex::new(
+                ScalableCuckooFilterBuilder::default()
+                    .initial_capacity(filter_capacity)
+                    .false_positive_probability(0.000_000_000_001)
+                    .rng(FastRng::default())
+                    .finish(),
+            )),
+        }
+    }
+
+    /// Returns [`ShortOutPoint`] for all inputs and outputs.
+    fn outpoints(block: Block) -> ShortOutPoints {
         let mut inputs = vec![];
         let mut outputs = vec![];
         for tx in block.txdata.iter() {
             let txid = tx.compute_txid();
             for input in &tx.input {
-                inputs.push(ShortOutPoint::new(&input.previous_output));
+                inputs.push(ShortOutPoint::from_outpoint(&input.previous_output));
             }
 
             for (index, _) in tx.output.iter().enumerate() {
-                let outpoint = OutPoint::new(txid, index as u32);
-                outputs.push(ShortOutPoint::new(&outpoint));
+                outputs.push(ShortOutPoint::new(index, &txid));
             }
         }
-        vec![(inputs, outputs)]
+        (inputs, outputs)
     }
 
-    // Access the `filter` lock in batch to reduce contention
-    fn batch(&self, items: Vec<OutPoints>) -> Vec<OutPoints> {
-        let filter = &mut self.filter.lock().unwrap();
+    /// Given the results of `outpoints()` update the filter.
+    pub fn update(&self, outpoints: ShortOutPoints) {
+        let mut filter = self.filter.lock().expect("Lock poisoned");
+        let (inputs, outputs) = outpoints;
+        for outpoint in outputs {
+            // insert outpoints for every output
+            filter.insert(&outpoint);
+        }
+        for input in inputs {
+            // remove outpoints that are spent in a subsequent transaction
+            filter.remove(&input);
+        }
+    }
+}
 
-        for (inputs, outputs) in items {
-            for output in outputs {
-                filter.insert(&output);
-            }
-            for input in inputs {
-                filter.remove(&input);
+/// Pipeline for multithreaded tracking of the input amounts and output statuses.
+#[derive(Clone, Default)]
+struct UtxoPipeline {
+    /// Optional filter containing all unspent outpoints.
+    filter: Option<Arc<ShortOutPointFilter>>,
+    /// Tracks the amounts for every input.
+    amounts: Arc<DashMap<ShortOutPoint, Amount>>,
+}
+
+impl UtxoPipeline {
+    /// Construct a new pipeline with an optional `filter` and initial `hashmap_capacity`.
+    fn new(filter: Option<ShortOutPointFilter>, hashmap_capacity: usize) -> Self {
+        Self {
+            filter: filter.map(Arc::new),
+            amounts: Arc::new(DashMap::with_capacity(hashmap_capacity)),
+        }
+    }
+
+    /// Returns the [`OutputStatus`] of an outpoint, returning [`OutputStatus::Unknown`] if running
+    /// without a filter.
+    fn status(&self, outpoint: &ShortOutPoint) -> OutputStatus {
+        match &self.filter {
+            None => OutputStatus::Unknown,
+            Some(filter) if filter.contains(outpoint) => OutputStatus::Unspent,
+            _ => OutputStatus::Spent,
+        }
+    }
+}
+
+impl Pipeline<UtxoBlock, UtxoBlock, UtxoBlock> for UtxoPipeline {
+    fn first(&self, mut block: UtxoBlock) -> UtxoBlock {
+        for tx in &mut block.txdata {
+            for (index, output) in tx.transaction.output.iter().enumerate() {
+                let outpoint = ShortOutPoint::new(index, &tx.txid);
+                let status = self.status(&outpoint);
+                // if an outpoint is unspent we don't need to track it (saving memory)
+                if status != OutputStatus::Unspent {
+                    self.amounts.insert(outpoint, output.value);
+                }
+                tx.outputs.push(status);
             }
         }
-        vec![]
+        block
     }
 
-    /// In order to track UTXO amounts we must process blocks in-order
-    fn options() -> Options {
-        Options::default().order_output()
-    }
-}
-
-/// Parser that tracks unspent outputs and input amounts to produce [`UtxoBlock`]
-///
-/// See the [module docs](crate::utxos) for example usage.
-#[derive(Clone)]
-pub struct UtxoParser {
-    unspent: Arc<Mutex<FxHashMap<ShortOutPoint, Amount>>>,
-    filter: Arc<OutPointFilter>,
-}
-impl UtxoParser {
-    /// Create a new parser from a file generated by [`FilterParser`]
-    pub fn new(filter_file: &str) -> Result<Self> {
-        let mut reader = BufReader::new(File::open(filter_file)?);
-        let mut buffer = vec![];
-        reader.read_to_end(&mut buffer)?;
-        let filter: OutPointFilter = postcard::from_bytes(&buffer)?;
-
-        Ok(Self {
-            unspent: Arc::new(Mutex::new(Default::default())),
-            filter: Arc::new(filter),
-        })
-    }
-}
-impl BlockParser<UtxoBlock> for UtxoParser {
-    // We try to perform as much computation as possible here where block order doesn't matter
-    // because we benefit from multithreading.
-    fn extract(&self, block: Block) -> Vec<UtxoBlock> {
-        let txids: Vec<Txid> = block.txdata.iter().map(|tx| tx.compute_txid()).collect();
-        let mut output_status = FxHashMap::<Txid, Vec<OutStatus>>::default();
-
-        for (tx, txid) in block.txdata.iter().zip(txids.iter()) {
-            let entry = output_status.entry(*txid).or_default();
-
-            for (index, _) in tx.output.iter().enumerate() {
-                let outpoint = ShortOutPoint::new(&OutPoint::new(*txid, index as u32));
-                if self.filter.contains(&outpoint) {
-                    entry.push(OutStatus::Unspent);
+    fn second(&self, mut block: UtxoBlock) -> UtxoBlock {
+        for tx in &mut block.txdata {
+            for input in tx.transaction.input.iter() {
+                if tx.transaction.is_coinbase() {
+                    // coinbase transactions will not have a previous input
+                    tx.inputs.push(Amount::ZERO);
                 } else {
-                    entry.push(OutStatus::Spent);
+                    let outpoint = ShortOutPoint::from_outpoint(&input.previous_output);
+                    let (_, value) = self.amounts.remove(&outpoint).expect("Missing outpoint");
+                    tx.inputs.push(value);
                 }
             }
         }
-
-        vec![UtxoBlock {
-            block,
-            txids,
-            input_amounts: Default::default(),
-            output_status,
-        }]
-    }
-
-    fn batch(&self, items: Vec<UtxoBlock>) -> Vec<UtxoBlock> {
-        let mut results = vec![];
-        let unspent = &mut self.unspent.lock().unwrap();
-
-        for mut block in items {
-            let mut input_amounts = FxHashMap::<Txid, Vec<Amount>>::default();
-            for (tx, txid) in block.transactions() {
-                let statuses = block.output_status(txid);
-                for (status, (index, output)) in statuses.iter().zip(tx.output.iter().enumerate()) {
-                    let outpoint = ShortOutPoint::new(&OutPoint::new(*txid, index as u32));
-                    // do not cache unspent outputs (or we will use a lot of memory in `self.unspent`
-                    if *status == OutStatus::Spent {
-                        unspent.insert(outpoint, output.value);
-                    }
-                }
-
-                for input in &tx.input {
-                    let entry = input_amounts.entry(*txid).or_default();
-                    let outpoint = ShortOutPoint::new(&input.previous_output);
-                    if let Some(amount) = unspent.remove(&outpoint) {
-                        entry.push(amount);
-                    } else if tx.is_coinbase() {
-                        entry.push(Amount::ZERO);
-                    } else {
-                        panic!("Input amount not found for {:?}", input.previous_output);
-                    }
-                }
-            }
-            block.input_amounts = input_amounts;
-            results.push(block);
-        }
-        results
-    }
-
-    /// In order to track UTXO amounts we must process blocks in-order
-    ///
-    /// We reduce the number of threads to reduce memory usage.
-    /// If you run into memory issues try lowering `num_threads` further or the `buffer_size`
-    fn options() -> Options {
-        Options::default().order_output().num_threads(64)
+        block
     }
 }
 
-/// Wrapper for a filter that implements [`Serialize`] and [`Send`]
-#[derive(Serialize, Deserialize, Debug)]
-pub struct OutPointFilter(ScalableCuckooFilter<ShortOutPoint, FastHasher, FastRng>);
-impl OutPointFilter {
-    /// Create a filter with a reasonable size and false positive rate
-    ///
-    /// Because we are storing SHA256 hashes from [`Txid`] we use non-cryptographic [`rand::Rng`] and
-    /// [`Hasher`] which are optimized for speed without bias.
-    pub fn new(initial_capacity: usize) -> Self {
-        Self(
-            ScalableCuckooFilterBuilder::default()
-                .initial_capacity(initial_capacity)
-                .false_positive_probability(0.000_000_000_001)
-                .rng(FastRng::default())
-                .hasher(FastHasher::default())
-                .finish(),
-        )
-    }
-
-    /// See [`ScalableCuckooFilter::contains`]
-    pub fn contains(&self, outpoint: &ShortOutPoint) -> bool {
-        self.0.contains(outpoint)
-    }
-
-    /// See [`ScalableCuckooFilter::insert`]
-    pub fn insert(&mut self, outpoint: &ShortOutPoint) {
-        self.0.insert(outpoint);
-    }
-
-    /// See [`ScalableCuckooFilter::remove`]
-    pub fn remove(&mut self, outpoint: &ShortOutPoint) {
-        self.0.remove(outpoint);
-    }
-
-    /// See [`ScalableCuckooFilter::shrink_to_fit`]
-    pub fn shrink_to_fit(&mut self) {
-        self.0.shrink_to_fit();
-    }
-}
-
-/// Shortened [`OutPoint`] to save memory
+/// Shortened [`OutPoint`] to save memory (14 bytes instead of 36 bytes)
+///
+/// - 2 bytes represent far more than the maximum tx outputs (2^16)
+/// - 12 byte subset of the txid is unlikely to generate collisions even with 1 billion txs (~6.3e-12)
 #[derive(Eq, PartialEq, Hash, Debug, Clone)]
-pub struct ShortOutPoint(pub Vec<u8>);
+struct ShortOutPoint(pub Vec<u8>);
 impl ShortOutPoint {
-    /// Shorten an existing [`OutPoint`]
-    ///
-    /// - 2 bytes represent far more than the maximum tx outputs (2^16)
-    /// - 12 byte subset of the txid is unlikely to generate collisions even with 1 billion txs (~6.3e-12)
-    pub fn new(outpoint: &OutPoint) -> ShortOutPoint {
+    /// Shorten an existing [`OutPoint`].
+    fn from_outpoint(outpoint: &OutPoint) -> ShortOutPoint {
+        Self::new(outpoint.vout as usize, &outpoint.txid)
+    }
+
+    /// Create a new [`ShortOutPoint`] given its transaction id and index.
+    fn new(vout: usize, txid: &Txid) -> ShortOutPoint {
         let mut bytes = vec![];
-        bytes.extend_from_slice(&outpoint.vout.to_le_bytes()[0..2]);
-        bytes.extend_from_slice(&outpoint.txid.as_byte_array()[0..12]);
+        bytes.extend_from_slice(&vout.to_le_bytes()[0..2]);
+        bytes.extend_from_slice(&txid.as_byte_array()[0..12]);
         ShortOutPoint(bytes)
     }
 }
 
-/// Contains a block that has been parsed with frequently needed UTXO information
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct UtxoBlock {
-    /// Underlying parsed block from [`bitcoin::Block`]
-    pub block: Block,
-    /// Precomputed txids for every transaction
-    txids: Vec<Txid>,
-    /// Map every tx in this block to the list of input amounts
-    input_amounts: FxHashMap<Txid, Vec<Amount>>,
-    /// Map every tx in this block to the list of output spent/unspent status
-    output_status: FxHashMap<Txid, Vec<OutStatus>>,
-}
-impl UtxoBlock {
-    /// Return all [`Transaction`] with [`Txid`] already calculated
-    pub fn transactions(&self) -> Zip<Iter<'_, Transaction>, Iter<'_, Txid>> {
-        self.block.txdata.iter().zip(self.txids.iter())
-    }
-
-    /// Given a tx in this block, return the in-order list of whether the output was spent/unspent
-    pub fn output_status(&self, txid: &Txid) -> &Vec<OutStatus> {
-        self.output_status.get(txid).expect("exists")
-    }
-
-    /// Given a tx in this block, return the in-order list of the input amounts
-    pub fn input_amount(&self, txid: &Txid) -> &Vec<Amount> {
-        self.input_amounts.get(txid).expect("exists")
-    }
-}
-/// Indicates what happens to this output
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OutStatus {
-    /// The output was spent in a later block
-    Spent,
-    /// The output was never spent in any of the blocks we parsed
-    Unspent,
-}
-
-/// [`FxHasher`] doesn't implement [`Debug`]
-#[derive(Default, Clone)]
-struct FastHasher(FxHasher);
-impl Hasher for FastHasher {
-    fn finish(&self) -> u64 {
-        self.0.finish()
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        self.0.write(bytes)
-    }
-}
-impl Debug for FastHasher {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str("FastHasher")
-    }
-}
-
-/// [`SmallRng`] doesn't implement [`Default`] required to deserialize
+/// Wrapper for [`SmallRng`] since it doesn't implement [`Default`] required to deserialize.
 #[derive(Debug)]
 struct FastRng(SmallRng);
 impl Default for FastRng {
@@ -388,29 +404,5 @@ impl RngCore for FastRng {
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), Error> {
         self.0.try_fill_bytes(dest)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::utxos::{OutPointFilter, ShortOutPoint};
-
-    #[test]
-    fn test_filter_serde() {
-        let mut filter = OutPointFilter::new(100);
-
-        filter.insert(&outpoint(0));
-        filter.insert(&outpoint(1));
-        let bytes = postcard::to_allocvec(&filter).unwrap();
-        let deserialized: OutPointFilter = postcard::from_bytes(&bytes).unwrap();
-
-        assert!(deserialized.contains(&outpoint(0)));
-        assert!(deserialized.contains(&outpoint(1)));
-        assert!(!deserialized.contains(&outpoint(2)));
-        assert!(!deserialized.contains(&outpoint(3)));
-    }
-
-    fn outpoint(n: u8) -> ShortOutPoint {
-        ShortOutPoint(vec![n])
     }
 }
