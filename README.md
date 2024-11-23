@@ -11,14 +11,14 @@
 [docs-badge]: https://img.shields.io/docsrs/bitcoin-block-parser
 [docs-url]: https://docs.rs/bitcoin-block-parser
 
-Fast optimized parser for bitcoin `blocks` with input amount and output status tracking.
+Fast optimized parser for bitcoin `blocks` with input and output tracking.
 
 ⚠️ The API is still evolving and should not be considered stable until release `1.0.0`
 
 ## Features
-- Parses blocks into the Rust bitcoin [`Block`](bitcoin::Block) format for easier manipulation
+- Parses blocks into the [Rust bitcoin](https://github.com/rust-bitcoin/rust-bitcoin) [`Block`](bitcoin::Block) format for easier manipulation
 - Can track if any [`TxOut`](bitcoin::TxOut) is spent or unspent for calculations on the UTXO set
-- Can track the [`Amount`](bitcoin::Amount) of every [`TxIn`](bitcoin::TxIn) for calculations such as fee rates
+- Can track the [`Amount`](bitcoin::Amount) of every [`TxIn`](bitcoin::TxIn) for calculating metrics such as fee rates
 - Multithreaded in-memory parsing provides the fastest block parsing performance
 
 ## Requirements / Benchmarks
@@ -53,8 +53,6 @@ for size in parser.parse(|block| block.total_size()) {
 See [`UtxoParser`](utxos::UtxoParser) for details on how to track inputs and outputs:
 ```rust
 use bitcoin_block_parser::*;
-
-use crate::*;
 
 let parser = UtxoParser::new("/home/user/.bitcoin/blocks/").unwrap();
 let blocks = parser.load_or_create_filter("filter.bin").unwrap().parse();
