@@ -26,10 +26,10 @@ Fast optimized parser for bitcoin `blocks` with input and output tracking.
 - We recommend using fast storage (e.g. NVMe) and a multithreaded CPU for best performance
 - See benchmarks below to understand how much RAM you may need:
 
-| Function                                                                   | Time    | Memory  |
-|----------------------------------------------------------------------------|---------|---------|
+| Function                                                                     | Time    | Memory  |
+|------------------------------------------------------------------------------|---------|---------|
 | `BlockParser::parse()`<br/>Parses blocks                                     | 2m 55s  | 0.9 GB  | 
-| `UtxoParser::parse()`<br/>Tracks input amounts (no filter)                   | 7m 41s  | 25.0 GB | 
+| `UtxoParser::parse()`<br/>Tracks input amounts (no filter)                   | 7m 13s  | 25.0 GB | 
 | `UtxoParser::create_filter()`<br/>Creates new filter                         | 16m 09s | 5.6 GB  |
 | `UtxoParser::load_filter().parse()`<br/>Tracks input & outputs (with filter) | 7m 46s  | 11.8 GB |
 
@@ -43,7 +43,7 @@ use bitcoin_block_parser::*;
 // Initialize a logger (if you want to monitor parsing progress)
 env_logger::builder().filter_level(log::LevelFilter::Info).init();
 
-// Parse all blocks in the directory and map them to a value
+// Parse all blocks in the directory and map them to total_size
 let parser = BlockParser::new("/home/user/.bitcoin/blocks/").unwrap();
 for size in parser.parse(|block| block.total_size()) {
   // Do something with the block sizes
@@ -55,9 +55,10 @@ See [`UtxoParser`](utxos::UtxoParser) for details on how to track inputs and out
 use bitcoin_block_parser::*;
 
 let parser = UtxoParser::new("/home/user/.bitcoin/blocks/").unwrap();
-let blocks = parser.load_or_create_filter("filter.bin").unwrap().parse();
-for block in blocks {
-  for tx in block.txdata {
+// Load a filter file or create a new one for tracking output status
+let blocks = parser.load_or_create_filter("filter.bin").unwrap();
+for txdata in blocks.parse(|block| block.txdata) {
+  for tx in txdata {
     for (output, status) in tx.output() {
       // Do something with the output status
     }

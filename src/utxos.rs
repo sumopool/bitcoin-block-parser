@@ -106,7 +106,7 @@ type ShortOutPointFilter = ScalableCuckooFilter<ShortOutPoint, DefaultHasher, Fa
 /// use bitcoin_block_parser::utxos::*;
 ///
 /// let parser = UtxoParser::new("/home/user/.bitcoin/blocks/").unwrap();
-/// let fees = parser.parse().map_parallel(|block| {
+/// let fees = parser.parse(|block| {
 ///     let mut max_mining_fee = Amount::ZERO;
 ///     for tx in block.txdata.into_iter() {
 ///         // For every transaction sum up the input and output amounts
@@ -133,8 +133,8 @@ type ShortOutPointFilter = ScalableCuckooFilter<ShortOutPoint, DefaultHasher, Fa
 /// use bitcoin_block_parser::utxos::*;
 ///
 /// let parser = UtxoParser::new("/home/user/.bitcoin/blocks/").unwrap();
-/// let blocks = parser.load_or_create_filter("filter.bin").unwrap().parse();
-/// let amounts = blocks.map_parallel(|block| {
+/// let parser = parser.load_or_create_filter("filter.bin").unwrap();
+/// let amounts = parser.parse(|block| {
 ///     let mut max_unspent_tx = Amount::ZERO;
 ///     for tx in block.txdata.into_iter() {
 ///         for (output, status) in tx.output() {
@@ -183,15 +183,22 @@ impl UtxoParser {
         self
     }
 
-    /// Parse the blocks into an iterator of [`UtxoBlock`].
-    pub fn parse(self) -> ParserIterator<UtxoBlock> {
+    /// Parse all [`UtxoBlock`] into type `T` and return a [`ParserIterator<T>`].  Results will
+    /// be in random order due to multithreading.
+    ///
+    /// * `extract` - a closure that runs on multiple threads.  For best performance perform as much
+    ///    computation and data reduction here as possible.
+    pub fn parse<T: Send + 'static>(
+        self,
+        extract: impl Fn(UtxoBlock) -> T + Clone + Send + 'static,
+    ) -> ParserIterator<T> {
         // if using a filter we can save memory by reducing the initial hashmap capacity
         let hashmap_capacity = if self.filter.is_some() {
             self.estimated_utxos / 10
         } else {
             self.estimated_utxos
         };
-        let pipeline = UtxoPipeline::new(self.filter, hashmap_capacity);
+        let pipeline = UtxoPipeline::new(self.filter, hashmap_capacity, extract);
         self.parser
             .parse(UtxoBlock::new)
             .ordered()
@@ -300,19 +307,22 @@ impl UtxoFilter {
 
 /// Pipeline for multithreaded tracking of the input amounts and output statuses.
 #[derive(Clone, Default)]
-struct UtxoPipeline {
+struct UtxoPipeline<F> {
     /// Optional filter containing all unspent outpoints.
     filter: Option<Arc<ShortOutPointFilter>>,
     /// Tracks the amounts for every input.
     amounts: Arc<DashMap<ShortOutPoint, Amount>>,
+    /// Extract function that maps the [`UtxoBlock`] to a new type
+    extract: F,
 }
 
-impl UtxoPipeline {
+impl<F> UtxoPipeline<F> {
     /// Construct a new pipeline with an optional `filter` and initial `hashmap_capacity`.
-    fn new(filter: Option<ShortOutPointFilter>, hashmap_capacity: usize) -> Self {
+    fn new(filter: Option<ShortOutPointFilter>, hashmap_capacity: usize, extract: F) -> Self {
         Self {
             filter: filter.map(Arc::new),
             amounts: Arc::new(DashMap::with_capacity(hashmap_capacity)),
+            extract,
         }
     }
 
@@ -327,7 +337,10 @@ impl UtxoPipeline {
     }
 }
 
-impl Pipeline<UtxoBlock, UtxoBlock, UtxoBlock> for UtxoPipeline {
+impl<F, T> Pipeline<UtxoBlock, UtxoBlock, T> for UtxoPipeline<F>
+where
+    F: Fn(UtxoBlock) -> T + Clone + Send + 'static,
+{
     fn first(&self, mut block: UtxoBlock) -> UtxoBlock {
         for tx in &mut block.txdata {
             for (index, output) in tx.transaction.output.iter().enumerate() {
@@ -343,7 +356,7 @@ impl Pipeline<UtxoBlock, UtxoBlock, UtxoBlock> for UtxoPipeline {
         block
     }
 
-    fn second(&self, mut block: UtxoBlock) -> UtxoBlock {
+    fn second(&self, mut block: UtxoBlock) -> T {
         for tx in &mut block.txdata {
             for input in tx.transaction.input.iter() {
                 if tx.transaction.is_coinbase() {
@@ -356,7 +369,7 @@ impl Pipeline<UtxoBlock, UtxoBlock, UtxoBlock> for UtxoPipeline {
                 }
             }
         }
-        block
+        (self.extract)(block)
     }
 }
 

@@ -168,7 +168,7 @@ impl Pipeline<Block, (BlockHash, usize), isize> for BlockSizePipeline {
 }
 
 fn utxo_parse(parser: UtxoParser) {
-    let fees = parser.parse().map_parallel(|block| {
+    let fees = parser.parse(|block| {
         let mut max_mining_fee = Amount::ZERO;
         for tx in block.txdata.into_iter() {
             // For every transaction sum up the input and output amounts
@@ -190,8 +190,8 @@ fn create_filter(parser: UtxoParser, filter_file: &str) -> Result<()> {
 }
 
 fn load_filter(parser: UtxoParser, filter_file: &str) -> Result<()> {
-    let blocks = parser.load_filter(filter_file)?.parse();
-    let amounts = blocks.map_parallel(|block| {
+    let blocks = parser.load_filter(filter_file)?;
+    let amounts = blocks.parse(|block| {
         let mut max_unspent_tx = Amount::ZERO;
         for tx in block.txdata.into_iter() {
             for (output, status) in tx.output() {
@@ -213,7 +213,7 @@ fn test(args: Args) -> Result<()> {
         .block_range_end(151_000)
         .create_filter(&args.filter_file)?
         .load_filter(&args.filter_file)?
-        .parse();
+        .parse(identity);
 
     println!("\nTesting UtxoParser");
     let test_block =

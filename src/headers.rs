@@ -71,13 +71,14 @@ impl HeaderParser {
                 }
             }
         }
-        info!("Finished reading headers");
 
         // Resolve reorgs and order the headers by block height
         for collision in collisions {
             Self::resolve_collisions(&mut locations, collision);
         }
-        Ok(Self::order_headers(locations))
+        let ordered = Self::order_headers(locations);
+        info!("Finished reading {} headers", ordered.len());
+        Ok(ordered)
     }
 
     /// Parses headers from a BLK file
