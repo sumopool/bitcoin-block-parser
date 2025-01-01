@@ -1,12 +1,12 @@
 [package]
 name = "bitcoin-block-parser"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 authors = ["Saigo Nanshu"]
 license = "MIT"
 repository = "https://github.com/sumopool/bitcoin-block-parser"
 readme = "README.md"
-description = "Fast optimized parser for the bitcoin `blocks` data with UTXO tracking."
+description = "Blazing fast parser for bitcoin 'blocks' data with input amount and output spend tracking."
 categories = ["cryptography::cryptocurrencies"]
 keywords = [ "crypto", "bitcoin" ]
 documentation = "https://docs.rs/bitcoin-block-parser"

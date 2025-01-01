@@ -31,14 +31,15 @@ use threadpool::ThreadPool;
 /// println!("Total blockchain size: {}", iterator.sum::<u64>());
 /// ```
 ///
-/// You can call `block_range()` to constrain the block range and `ordered()` to ensure the
+/// You can call `start_height()` to constrain the block range and `ordered()` to ensure the
 /// iterator returns blocks in height order:
 /// ```no_run
 /// use bitcoin_block_parser::blocks::*;
 ///
 /// let parser = BlockParser::new("/home/user/.bitcoin/blocks/").unwrap();
 /// let iterator = parser
-///     .block_range(100_000, 100_010)
+///     .start_height(100_000)
+///     .end_height(100_010)
 ///     .parse(|block| block.block_hash())
 ///     .ordered();
 ///
@@ -83,14 +84,20 @@ impl BlockParser {
         })
     }
 
-    /// Sets the *inclusive* range of block heights to parse.
+    /// Sets the *inclusive* start of block heights to parse.
     ///
     /// * `start_height` - must be less than the total number of blocks, `0` will start at the
     ///    genesis block.
+    pub fn start_height(mut self, start_height: usize) -> Self {
+        self.start_height = start_height;
+        self
+    }
+
+    /// Sets the *inclusive* end of block heights to parse.
+    ///
     /// * `end_height` - the height to end at, [`usize::MAX`] will stop at the last block
     ///    available.
-    pub fn block_range(mut self, start_height: usize, end_height: usize) -> Self {
-        self.start_height = start_height;
+    pub fn end_height(mut self, end_height: usize) -> Self {
         self.end_height = end_height;
         self
     }
@@ -186,6 +193,20 @@ impl<A: Send + 'static> ParserIterator<A> {
             options: self.options.clone(),
             start_height: self.start_height,
         }
+    }
+
+    /// Adds the block height to this iterator.
+    pub fn with_height(&self) -> ParserIterator<(usize, A)> {
+        let (tx, rx) = bounded(self.options.channel_size);
+        let parser = self.create(rx);
+        let rx_a = self.rx.clone();
+
+        thread::spawn(move || {
+            for (height, a) in rx_a {
+                let _ = tx.send((height, (height, a)));
+            }
+        });
+        parser
     }
 
     /// Orders the results by block height, can be called for a small increase in

@@ -11,27 +11,26 @@
 [docs-badge]: https://img.shields.io/docsrs/bitcoin-block-parser
 [docs-url]: https://docs.rs/bitcoin-block-parser
 
-Fast optimized parser for bitcoin `blocks` with input and output tracking.
+Blazing fast parser for bitcoin `blocks` data with input amount and output spend tracking.
 
 ⚠️ The API is still evolving and should not be considered stable until release `1.0.0`
 
 ## Features
 - Parses blocks into the [Rust bitcoin](https://github.com/rust-bitcoin/rust-bitcoin) [`Block`](bitcoin::Block) format for easier manipulation
 - Can track if any [`TxOut`](bitcoin::TxOut) is spent or unspent for calculations on the UTXO set
-- Can track the [`Amount`](bitcoin::Amount) of every [`TxIn`](bitcoin::TxIn) for calculating metrics such as fee rates
-- Multithreaded in-memory parsing provides the fastest block parsing performance
+- Can track the [`TxOut`](bitcoin::Amount) of every [`TxIn`](bitcoin::TxIn) for calculating metrics such as fee rates
+- Multithreaded in-memory parsing provides fast block parsing performance
 
 ## Requirements / Benchmarks
 - You must be running a [non-pruning](https://bitcoin.org/en/full-node#reduce-storage) bitcoin node (this is the default configuration)
 - We recommend using fast storage (e.g. NVMe) and a multithreaded CPU for best performance
 - See benchmarks below to understand how much RAM you may need:
 
-| Function                                                                     | Time    | Memory  |
-|------------------------------------------------------------------------------|---------|---------|
-| `BlockParser::parse()`<br/>Parses blocks                                     | 2m 55s  | 0.9 GB  | 
-| `UtxoParser::parse()`<br/>Tracks input amounts (no filter)                   | 7m 13s  | 25.0 GB | 
-| `UtxoParser::create_filter()`<br/>Creates new filter                         | 16m 09s | 5.6 GB  |
-| `UtxoParser::load_filter().parse()`<br/>Tracks input & outputs (with filter) | 7m 46s  | 11.8 GB |
+| Function                                              | Time    | Memory  |
+|-------------------------------------------------------|---------|---------|
+| `BlockParser::parse()`<br/>Parses blocks              | 2m 55s  | 0.9 GB  | 
+| `UtxoParser::create_filter()`<br/>Create a new filter | 15m 12s | 2.6 GB  | 
+| `UtxoParser::parse()`<br/>Parse with existing filter  | 18m 30s | 12.1 GB |
 
 Our benchmarks were run on NVMe storage with a 32-thread processor on **800,000** blocks.
 
@@ -54,16 +53,15 @@ See [`UtxoParser`](utxos::UtxoParser) for details on how to track inputs and out
 ```rust
 use bitcoin_block_parser::*;
 
-let parser = UtxoParser::new("/home/user/.bitcoin/blocks/").unwrap();
 // Load a filter file or create a new one for tracking output status
-let blocks = parser.load_or_create_filter("filter.bin").unwrap();
-for txdata in blocks.parse(|block| block.txdata) {
+let parser = UtxoParser::new("/home/user/.bitcoin/blocks/", "filter.bin");
+for txdata in parser.parse(|block| block.txdata).unwrap() {
   for tx in txdata {
     for (output, status) in tx.output() {
       // Do something with the output status
     }
-    for (input, amount) in tx.input() {
-      // Do something with the input amounts
+    for (input, output) in tx.input() {
+      // Do something with TxOut that are used in the inputs
     }
   }
 }

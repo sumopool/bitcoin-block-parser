@@ -5,7 +5,6 @@ use bitcoin_block_parser::blocks::{BlockParser, ParserIterator, Pipeline};
 use bitcoin_block_parser::utxos::{OutputStatus, UtxoParser};
 use clap::{Parser, ValueEnum};
 use dashmap::DashMap;
-use std::cmp::max;
 use std::collections::HashMap;
 use std::convert::identity;
 use std::str::FromStr;
@@ -39,9 +38,8 @@ enum Function {
     NoPipelineFn,
     PipelineFn,
     Pipeline,
+    UtxoCreate,
     UtxoParse,
-    CreateFilter,
-    LoadFilter,
     Test,
 }
 
@@ -53,11 +51,11 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     fn block_parser(blocks_dir: &str) -> Result<BlockParser> {
-        Ok(BlockParser::new(blocks_dir)?.block_range(0, BLOCKS_TO_PARSE))
+        Ok(BlockParser::new(blocks_dir)?.end_height(BLOCKS_TO_PARSE))
     }
 
-    fn utxo_parser(blocks_dir: &str) -> Result<UtxoParser> {
-        Ok(UtxoParser::new(blocks_dir)?.block_range_end(BLOCKS_TO_PARSE))
+    fn utxo_parser(blocks_dir: &str, filter_file: &str) -> Result<UtxoParser> {
+        Ok(UtxoParser::new(blocks_dir, filter_file).end_height(BLOCKS_TO_PARSE))
     }
 
     match args.run {
@@ -68,9 +66,8 @@ fn main() -> Result<()> {
         Function::NoPipelineFn => no_pipeline_fn(block_parser(&args.blocks_dir)?),
         Function::PipelineFn => pipeline_fn(block_parser(&args.blocks_dir)?),
         Function::Pipeline => pipeline(block_parser(&args.blocks_dir)?),
-        Function::UtxoParse => utxo_parse(utxo_parser(&args.blocks_dir)?),
-        Function::CreateFilter => create_filter(utxo_parser(&args.blocks_dir)?, &args.filter_file)?,
-        Function::LoadFilter => load_filter(utxo_parser(&args.blocks_dir)?, &args.filter_file)?,
+        Function::UtxoCreate => utxo_create(utxo_parser(&args.blocks_dir, &args.filter_file)?),
+        Function::UtxoParse => utxo_parse(utxo_parser(&args.blocks_dir, &args.filter_file)?),
         Function::Test => test(args)?,
     }
     Ok(())
@@ -167,53 +164,30 @@ impl Pipeline<Block, (BlockHash, usize), isize> for BlockSizePipeline {
     }
 }
 
+fn utxo_create(parser: UtxoParser) {
+    parser.create_filter().unwrap();
+}
+
 fn utxo_parse(parser: UtxoParser) {
-    let fees = parser.parse(|block| {
-        let mut max_mining_fee = Amount::ZERO;
-        for tx in block.txdata.into_iter() {
-            // For every transaction sum up the input and output amounts
-            let inputs: Amount = tx.input().map(|(_, amount)| *amount).sum();
-            let outputs: Amount = tx.output().map(|(out, _)| out.value).sum();
-            if !tx.transaction.is_coinbase() {
-                // Subtract outputs amount from inputs amount to get the fee
-                max_mining_fee = max(inputs - outputs, max_mining_fee);
+    for txdata in parser.parse(|block| block.txdata).unwrap() {
+        for tx in txdata {
+            for (_, _) in tx.output() {
+                // Do something with the output status
+            }
+            for (_, _) in tx.input() {
+                // Do something with TxOut that are used in the inputs
             }
         }
-        max_mining_fee
-    });
-    println!("Maximum mining fee: {}", fees.max().unwrap());
-}
-
-fn create_filter(parser: UtxoParser, filter_file: &str) -> Result<()> {
-    parser.create_filter(filter_file)?;
-    Ok(())
-}
-
-fn load_filter(parser: UtxoParser, filter_file: &str) -> Result<()> {
-    let blocks = parser.load_filter(filter_file)?;
-    let amounts = blocks.parse(|block| {
-        let mut max_unspent_tx = Amount::ZERO;
-        for tx in block.txdata.into_iter() {
-            for (output, status) in tx.output() {
-                if status == &OutputStatus::Unspent {
-                    max_unspent_tx = max(output.value, max_unspent_tx);
-                }
-            }
-        }
-        max_unspent_tx
-    });
-    println!("Maximum unspent output: {}", amounts.max().unwrap());
-    Ok(())
+    }
 }
 
 /// Integration test based off of real mainchain data
 fn test(args: Args) -> Result<()> {
     println!("\nTesting write_filter");
-    let parser = UtxoParser::new(&args.blocks_dir)?
-        .block_range_end(151_000)
-        .create_filter(&args.filter_file)?
-        .load_filter(&args.filter_file)?
-        .parse(identity);
+    let parser = UtxoParser::new(&args.blocks_dir, &args.filter_file)
+        .end_height(151_000)
+        .create_filter()?
+        .parse(identity)?;
 
     println!("\nTesting UtxoParser");
     let test_block =
@@ -236,7 +210,7 @@ fn test(args: Args) -> Result<()> {
             }
             // Verify tx amounts here https://mempool.space/tx/cf2cc1897eb061e2406e644ecee3c26ee64cfadcc626890438c3d058511c9094
             if tx.txid == test_txid2 {
-                let amounts: Vec<_> = tx.input().map(|(_, amount)| *amount).collect();
+                let amounts: Vec<_> = tx.input().map(|(_, out)| out.value).collect();
                 let real_amounts = vec![
                     Amount::from_sat(56892597),
                     Amount::from_sat(274000000),
