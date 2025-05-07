@@ -3,6 +3,7 @@
 
 use crate::xor::{XorReader, XOR_MASK_LEN};
 use anyhow::bail;
+use anyhow::Context;
 use anyhow::Result;
 use bitcoin::block::Header;
 use bitcoin::consensus::Decodable;
@@ -87,7 +88,10 @@ impl HeaderParser {
         xor_mask: Option<[u8; XOR_MASK_LEN]>,
     ) -> Result<Vec<ParsedHeader>> {
         let buffer_size = PRE_HEADER_SIZE + Header::SIZE;
-        let reader = XorReader::new(File::open(&path)?, xor_mask);
+        let reader = XorReader::new(
+            File::open(&path).context(path.display().to_string())?,
+            xor_mask,
+        );
         let mut reader = BufReader::with_capacity(buffer_size, reader);
 
         let mut offset = 0;
@@ -117,7 +121,7 @@ impl HeaderParser {
 
     /// Returns the list of all BLK files in the dir
     fn blk_files(dir: &str) -> Result<Vec<PathBuf>> {
-        let read_dir = fs::read_dir(Path::new(&dir))?;
+        let read_dir = fs::read_dir(Path::new(&dir)).context(dir.to_string())?;
         let mut files = vec![];
 
         for file in read_dir {
