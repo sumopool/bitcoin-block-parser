@@ -89,7 +89,7 @@ impl HeaderParser {
     ) -> Result<Vec<ParsedHeader>> {
         let buffer_size = PRE_HEADER_SIZE + Header::SIZE;
         let reader = XorReader::new(
-            File::open(&path).context(path.display().to_string())?,
+            File::open(&path).context(format!("Could not open: {}", path.display().to_string()))?,
             xor_mask,
         );
         let mut reader = BufReader::with_capacity(buffer_size, reader);
