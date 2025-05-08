@@ -79,6 +79,9 @@ impl HeaderParser {
         }
         let ordered = Self::order_headers(locations);
         info!("Finished reading {} headers", ordered.len());
+        if ordered.len() == 0 {
+            bail!("Read 0 Headers. Is blk000000.dat missing?");
+        }
         Ok(ordered)
     }
 
